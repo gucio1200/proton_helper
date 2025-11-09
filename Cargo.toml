@@ -1,0 +1,12 @@
+[package]
+name = "natpmp_refresh"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+natpmp = "0.5.0"
+tokio = { version = "1", features = ["full"] }
+tokio-retry = "0.3"
+chrono = "0.4"
+reqwest = "0.12"
+anyhow = "1.0"
