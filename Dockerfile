@@ -12,11 +12,11 @@ RUN rustup target add x86_64-unknown-linux-musl
 
 RUN cargo build --release --target x86_64-unknown-linux-musl
 
-FROM scratch
+FROM alpine
 
 WORKDIR /app
 
-COPY --from=builder --chown=1000:1000 /app/target/release/natpmp_refresh /app/natpmp_refresh
+COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/natpmp_refresh /app/natpmp_refresh
 
 USER 1000
 

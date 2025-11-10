@@ -10,7 +10,7 @@ use chrono::Local;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Read environment variables, with new defaults
+    // Read environment variables
     let gateway: Ipv4Addr = env::var("NATPMP_GATEWAY").unwrap_or("10.2.0.1".to_string()).parse()?;
     let internal_port: u16 = env::var("INTERNAL_PORT").unwrap_or("0".to_string()).parse()?; // internal port 0
     let public_port: u16 = env::var("PUBLIC_PORT").unwrap_or("1".to_string()).parse()?;      // public port 1
@@ -19,7 +19,6 @@ async fn main() -> Result<()> {
     let qbittorrent_host = env::var("QBITTORRENT_HOST").unwrap_or("http://127.0.0.1".to_string());
     let qbittorrent_port: u16 = env::var("QBITTORRENT_PORT").unwrap_or("8080".to_string()).parse()?;
 
-    // NAT-PMP client wrapped for async access
     let client = Arc::new(Mutex::new(Natpmp::new_with(gateway)?));
     let mut ticker = interval(Duration::from_secs(refresh_interval));
     let mut last_tcp_port: Option<u16> = None;
@@ -30,47 +29,82 @@ async fn main() -> Result<()> {
         gateway
     );
 
-    loop {
-        ticker.tick().await;
+    // Ctrl+C future
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+        println!("Received Ctrl+C, shutting down...");
+    };
 
-        // Wait for qBittorrent availability at each tick
-        wait_for_qbittorrent(&qbittorrent_host, qbittorrent_port).await?;
+    // Unix SIGTERM future (declare term_signal as mutable)
+    #[cfg(unix)]
+    let mut term_signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
-        let client_clone = client.clone();
-        let mapping_strategy = ExponentialBackoff::from_millis(50).map(jitter).take(5);
-
-        // TCP mapping
-        let tcp_port = Retry::spawn(mapping_strategy.clone(), move || {
-            let client_clone = client_clone.clone();
-            async move {
-                let mut c = client_clone.lock().await;
-                refresh_nat_mapping(&mut *c, Protocol::TCP, internal_port, public_port, lifetime).await
+    #[cfg(unix)]
+    let shutdown_signal = async {
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = term_signal.recv() => {
+                println!("Received SIGTERM, shutting down...");
             }
-        }).await?;
+        }
+    };
 
-        // UDP mapping
-        let client_clone = client.clone();
-        let udp_port = Retry::spawn(mapping_strategy, move || {
-            let client_clone = client_clone.clone();
-            async move {
-                let mut c = client_clone.lock().await;
-                refresh_nat_mapping(&mut *c, Protocol::UDP, internal_port, public_port, lifetime).await
+    #[cfg(not(unix))]
+    let shutdown_signal = ctrl_c;
+
+    // Main loop with shutdown support
+    tokio::select! {
+        _ = async {
+            loop {
+                ticker.tick().await;
+
+                // Wait for qBittorrent availability
+                wait_for_qbittorrent(&qbittorrent_host, qbittorrent_port).await?;
+
+                let client_clone = client.clone();
+                let mapping_strategy = ExponentialBackoff::from_millis(50).map(jitter).take(5);
+
+                // TCP NAT-PMP mapping
+                let tcp_port = Retry::spawn(mapping_strategy.clone(), move || {
+                    let client_clone = client_clone.clone();
+                    async move {
+                        let mut c = client_clone.lock().await;
+                        refresh_nat_mapping(&mut *c, Protocol::TCP, internal_port, public_port, lifetime).await
+                    }
+                }).await?;
+
+                // UDP NAT-PMP mapping
+                let client_clone = client.clone();
+                let udp_port = Retry::spawn(mapping_strategy, move || {
+                    let client_clone = client_clone.clone();
+                    async move {
+                        let mut c = client_clone.lock().await;
+                        refresh_nat_mapping(&mut *c, Protocol::UDP, internal_port, public_port, lifetime).await
+                    }
+                }).await?;
+
+                println!(
+                    "[{}] Public TCP port: {}, UDP port: {}",
+                    Local::now().format("%H:%M:%S"),
+                    tcp_port,
+                    udp_port
+                );
+
+                // Update qBittorrent listen port only if TCP port changed
+                if last_tcp_port != Some(tcp_port) {
+                    set_qbittorrent_listen_port(&qbittorrent_host, qbittorrent_port, tcp_port).await?;
+                    last_tcp_port = Some(tcp_port);
+                }
             }
-        }).await?;
-
-        println!(
-            "[{}] Public TCP port: {}, UDP port: {}",
-            Local::now().format("%H:%M:%S"),
-            tcp_port,
-            udp_port
-        );
-
-        // Update qBittorrent only if TCP port changed
-        if last_tcp_port != Some(tcp_port) {
-            set_qbittorrent_listen_port(&qbittorrent_host, qbittorrent_port, tcp_port).await?;
-            last_tcp_port = Some(tcp_port);
+            #[allow(unreachable_code)]
+            Ok::<(), anyhow::Error>(())
+        } => {},
+        _ = shutdown_signal => {
+            println!("Graceful shutdown complete.");
         }
     }
+
+    Ok(())
 }
 
 /// Refresh NAT-PMP mapping and return public port
@@ -95,12 +129,10 @@ async fn refresh_nat_mapping(
     }
 }
 
-/// Update qBittorrent listen port (no login required)
+/// Update qBittorrent listen port
 async fn set_qbittorrent_listen_port(host: &str, port: u16, new_port: u16) -> Result<()> {
     let client = Client::new();
     let url = format!("{}:{}/api/v2/app/setPreferences", host, port);
-
-    // Send 'json={"listen_port":...}' as form parameter
     let payload = format!(r#"{{"listen_port":{}}}"#, new_port);
 
     let resp = client.post(&url)
