@@ -1,6 +1,6 @@
 FROM rust:latest AS builder
 
-WORKDIR /usr/src/app
+WORKDIR /app
 
 COPY . .
 
@@ -12,8 +12,8 @@ FROM scratch
 
 WORKDIR /app
 
-COPY --from=builder --chown=1000:1000 /usr/src/app/target/release/natpmp_refresh /app/natpmp_refresh
+COPY --from=builder --chown=1000:1000 /app/target/release/natpmp_refresh /app/natpmp_refresh
 
 USER 1000:1000
 
-ENTRYPOINT ["./natpmp_refresh"]
+ENTRYPOINT ["/app/natpmp_refresh"]
