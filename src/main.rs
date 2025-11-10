@@ -1,34 +1,25 @@
-use anyhow::{anyhow, Result};
-use chrono::Local;
-use natpmp::{Error, Natpmp, Protocol, Response};
-use reqwest::Client;
 use std::{env, net::Ipv4Addr, sync::Arc, time::Duration};
+use natpmp::{Natpmp, Protocol, Response, Error};
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use tokio_retry::strategy::{jitter, ExponentialBackoff};
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
 use tokio_retry::Retry;
+use reqwest::Client;
+use anyhow::{Result, anyhow};
+use chrono::Local;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Environment variables
-    let gateway: Ipv4Addr = env::var("NATPMP_GATEWAY")
-        .unwrap_or("10.2.0.1".to_string())
-        .parse()?;
-    let internal_port: u16 = env::var("INTERNAL_PORT")
-        .unwrap_or("0".to_string())
-        .parse()?;
-    let public_port: u16 = env::var("PUBLIC_PORT").unwrap_or("1".to_string()).parse()?;
-    let lifetime: u32 = env::var("MAPPING_LIFETIME")
-        .unwrap_or("60".to_string())
-        .parse()?;
-    let refresh_interval: u64 = env::var("REFRESH_INTERVAL")
-        .unwrap_or("30".to_string())
-        .parse()?;
+    // Read environment variables, with new defaults
+    let gateway: Ipv4Addr = env::var("NATPMP_GATEWAY").unwrap_or("10.2.0.1".to_string()).parse()?;
+    let internal_port: u16 = env::var("INTERNAL_PORT").unwrap_or("0".to_string()).parse()?; // internal port 0
+    let public_port: u16 = env::var("PUBLIC_PORT").unwrap_or("1".to_string()).parse()?;      // public port 1
+    let lifetime: u32 = env::var("MAPPING_LIFETIME").unwrap_or("60".to_string()).parse()?;
+    let refresh_interval: u64 = env::var("REFRESH_INTERVAL").unwrap_or("30".to_string()).parse()?;
     let qbittorrent_host = env::var("QBITTORRENT_HOST").unwrap_or("http://127.0.0.1".to_string());
-    let qbittorrent_port: u16 = env::var("QBITTORRENT_PORT")
-        .unwrap_or("8080".to_string())
-        .parse()?;
+    let qbittorrent_port: u16 = env::var("QBITTORRENT_PORT").unwrap_or("8080".to_string()).parse()?;
 
+    // NAT-PMP client wrapped for async access
     let client = Arc::new(Mutex::new(Natpmp::new_with(gateway)?));
     let mut ticker = interval(Duration::from_secs(refresh_interval));
     let mut last_tcp_port: Option<u16> = None;
@@ -42,6 +33,9 @@ async fn main() -> Result<()> {
     loop {
         ticker.tick().await;
 
+        // Wait for qBittorrent availability at each tick
+        wait_for_qbittorrent(&qbittorrent_host, qbittorrent_port).await?;
+
         let client_clone = client.clone();
         let mapping_strategy = ExponentialBackoff::from_millis(50).map(jitter).take(5);
 
@@ -50,11 +44,9 @@ async fn main() -> Result<()> {
             let client_clone = client_clone.clone();
             async move {
                 let mut c = client_clone.lock().await;
-                refresh_nat_mapping(&mut *c, Protocol::TCP, internal_port, public_port, lifetime)
-                    .await
+                refresh_nat_mapping(&mut *c, Protocol::TCP, internal_port, public_port, lifetime).await
             }
-        })
-        .await?;
+        }).await?;
 
         // UDP mapping
         let client_clone = client.clone();
@@ -62,11 +54,9 @@ async fn main() -> Result<()> {
             let client_clone = client_clone.clone();
             async move {
                 let mut c = client_clone.lock().await;
-                refresh_nat_mapping(&mut *c, Protocol::UDP, internal_port, public_port, lifetime)
-                    .await
+                refresh_nat_mapping(&mut *c, Protocol::UDP, internal_port, public_port, lifetime).await
             }
-        })
-        .await?;
+        }).await?;
 
         println!(
             "[{}] Public TCP port: {}, UDP port: {}",
@@ -91,8 +81,7 @@ async fn refresh_nat_mapping(
     public_port: u16,
     lifetime: u32,
 ) -> Result<u16> {
-    client
-        .send_port_mapping_request(protocol, internal_port, public_port, lifetime)
+    client.send_port_mapping_request(protocol, internal_port, public_port, lifetime)
         .map_err(|e| anyhow!("Failed to send NAT-PMP request: {:?}", e))?;
 
     loop {
@@ -100,9 +89,7 @@ async fn refresh_nat_mapping(
             Ok(Response::TCP(resp)) if protocol == Protocol::TCP => return Ok(resp.public_port()),
             Ok(Response::UDP(resp)) if protocol == Protocol::UDP => return Ok(resp.public_port()),
             Ok(_) => return Err(anyhow!("Unexpected NAT-PMP response type")),
-            Err(e) if e == Error::NATPMP_TRYAGAIN => {
-                tokio::time::sleep(Duration::from_millis(50)).await
-            }
+            Err(e) if e == Error::NATPMP_TRYAGAIN => tokio::time::sleep(Duration::from_millis(50)).await,
             Err(e) => return Err(anyhow!("NAT-PMP error: {:?}", e)),
         }
     }
@@ -113,10 +100,13 @@ async fn set_qbittorrent_listen_port(host: &str, port: u16, new_port: u16) -> Re
     let client = Client::new();
     let url = format!("{}:{}/api/v2/app/setPreferences", host, port);
 
-    // Working method: send 'json={"listen_port":...}' as form
+    // Send 'json={"listen_port":...}' as form parameter
     let payload = format!(r#"{{"listen_port":{}}}"#, new_port);
 
-    let resp = client.post(&url).form(&[("json", payload)]).send().await?;
+    let resp = client.post(&url)
+        .form(&[("json", payload)])
+        .send()
+        .await?;
 
     if !resp.status().is_success() {
         let text = resp.text().await.unwrap_or_default();
@@ -128,6 +118,27 @@ async fn set_qbittorrent_listen_port(host: &str, port: u16, new_port: u16) -> Re
         chrono::Local::now().format("%H:%M:%S"),
         new_port
     );
+
+    Ok(())
+}
+
+/// Wait until qBittorrent WebUI is available
+async fn wait_for_qbittorrent(host: &str, port: u16) -> Result<()> {
+    let client = Client::new();
+    let url = format!("{}:{}/api/v2/app/version", host, port);
+
+    loop {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => break,
+            Ok(resp) => {
+                println!("qBittorrent returned HTTP {}. Retrying...", resp.status());
+            }
+            Err(_) => {
+                println!("qBittorrent not reachable. Retrying...");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 
     Ok(())
 }
