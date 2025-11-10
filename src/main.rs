@@ -7,6 +7,7 @@ use tokio_retry::Retry;
 use reqwest::Client;
 use anyhow::{Result, anyhow};
 use chrono::Local;
+use serde_json::Value;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +22,6 @@ async fn main() -> Result<()> {
 
     let client = Arc::new(Mutex::new(Natpmp::new_with(gateway)?));
     let mut ticker = interval(Duration::from_secs(refresh_interval));
-    let mut last_tcp_port: Option<u16> = None;
 
     println!(
         "[{}] Starting NAT-PMP refresher for gateway {}",
@@ -90,10 +90,23 @@ async fn main() -> Result<()> {
                     udp_port
                 );
 
-                // Update qBittorrent listen port only if TCP port changed
-                if last_tcp_port != Some(tcp_port) {
+                // Check qBittorrent current listen port
+                let current_qb_port = get_qbittorrent_listen_port(&qbittorrent_host, qbittorrent_port).await?;
+
+                if current_qb_port != tcp_port {
                     set_qbittorrent_listen_port(&qbittorrent_host, qbittorrent_port, tcp_port).await?;
-                    last_tcp_port = Some(tcp_port);
+                    println!(
+                        "[{}] qBittorrent listen_port updated from {} to {}",
+                        Local::now().format("%H:%M:%S"),
+                        current_qb_port,
+                        tcp_port
+                    );
+                } else {
+                    println!(
+                        "[{}] qBittorrent listen_port {} is up-to-date",
+                        Local::now().format("%H:%M:%S"),
+                        current_qb_port
+                    );
                 }
             }
             #[allow(unreachable_code)]
@@ -145,13 +158,25 @@ async fn set_qbittorrent_listen_port(host: &str, port: u16, new_port: u16) -> Re
         anyhow::bail!("qBittorrent failed to set listen_port: {}", text);
     }
 
-    println!(
-        "[{}] Updated qBittorrent listen_port to {}",
-        chrono::Local::now().format("%H:%M:%S"),
-        new_port
-    );
-
     Ok(())
+}
+
+/// Fetch current qBittorrent listen_port
+async fn get_qbittorrent_listen_port(host: &str, port: u16) -> Result<u16> {
+    let client = Client::new();
+    let url = format!("{}:{}/api/v2/app/preferences", host, port);
+
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed to get qBittorrent preferences: HTTP {}", resp.status());
+    }
+
+    let json: Value = resp.json().await?;
+    if let Some(lp) = json.get("listen_port").and_then(|v| v.as_u64()) {
+        Ok(lp as u16)
+    } else {
+        anyhow::bail!("listen_port field missing in qBittorrent preferences");
+    }
 }
 
 /// Wait until qBittorrent WebUI is available

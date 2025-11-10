@@ -8,6 +8,7 @@ natpmp = "0.5.0"
 tokio = { version = "1", features = ["full"] }
 tokio-retry = "0.3"
 chrono = "0.4"
-reqwest = "0.12"
+reqwest = { version = "0.12", features = ["json", "gzip"] }
 anyhow = "1.0"
 openssl = { version = "0.10.75", features = ["vendored"] }
+serde_json = "1.0"
