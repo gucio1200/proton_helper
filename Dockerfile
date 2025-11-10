@@ -1,16 +1,18 @@
 FROM rust:latest AS builder
 
+RUN apt update -y
+
+RUN apt install -y musl-dev openssl
+
 WORKDIR /app
 
 COPY . .
 
-RUN cargo fetch
+RUN rustup target add x86_64-unknown-linux-musl
 
-RUN cargo build --release
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
-FROM alpine:latest
-
-RUN apk add --no-cache ca-certificates
+FROM scratch
 
 WORKDIR /app
 
