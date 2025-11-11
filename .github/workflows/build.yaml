@@ -11,7 +11,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        docker:
+          - wg
+          - pnp
     steps:
       # Checkout repository
       - name: Checkout code
@@ -19,6 +23,7 @@ jobs:
 
       # Set up Docker Buildx (optional, for multi-arch builds)
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v2
 
       # Log in to Docker Hub (optional)
@@ -32,13 +37,14 @@ jobs:
         id: vars
         run: echo "COMMIT_HASH=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      # Build Docker image
-      - name: Build Docker image
-        run: |
-          docker build -t natpmp_refresh:${{ env.COMMIT_HASH }} .
-
-      # Push Docker image (optional)
-      - name: Push Docker image
-        run: |
-          docker tag natpmp_refresh:${{ env.COMMIT_HASH }} unixology/proton_helper:${{ env.COMMIT_HASH }}
-          docker push unixology/proton_helper:${{ env.COMMIT_HASH }}
+      - name: Build
+        uses: docker/build-push-action@v5
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ./${{ matrix.docker }}
+          file: ./${{ matrix.docker }}/Dockerfile
+          push: true
+          tags: |
+            unixology/${{ matrix.docker }}:${{ env.COMMIT_HASH }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max

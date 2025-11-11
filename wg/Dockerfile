@@ -16,8 +16,8 @@ FROM alpine
 
 WORKDIR /app
 
-COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/natpmp_refresh /app/natpmp_refresh
+COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/wg /app/wg
 
 USER 1000
 
-ENTRYPOINT ["/app/natpmp_refresh"]
+ENTRYPOINT ["/app/wg"]
