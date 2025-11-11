@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     fail_count, 5
                 );
             }
-            thread::sleep(Duration::from_secs(10));
+            thread::sleep(Duration::from_secs(2));
         }
 
         if !running.load(std::sync::atomic::Ordering::SeqCst) {
