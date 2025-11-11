@@ -177,7 +177,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             endpoint_ip,
         )?;
 
-        thread::sleep(Duration::from_secs(5));
     }
 
     println!("[INFO] Program terminated gracefully.");
