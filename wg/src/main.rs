@@ -38,7 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let features: Vec<&str> = features_str.split(',').collect();
 
     let mut headers = HeaderMap::new();
-    headers.insert("x-pm-appversion", HeaderValue::from_static("web-account@5.0.310.0"));
+    headers.insert(
+        "x-pm-appversion",
+        HeaderValue::from_static("web-account@5.0.310.0"),
+    );
     headers.insert("x-pm-uid", HeaderValue::from_str(&auth_server)?);
     headers.insert(
         "Accept",
@@ -159,11 +162,31 @@ fn regenerate_vpn_flow(
         let status = s["Status"].as_u64().unwrap_or(0);
 
         let feat_flags = [
-            if s["Features"].as_u64().unwrap_or(0) & 1 == 1 { "SecureCore" } else { "-SecureCore" },
-            if s["Features"].as_u64().unwrap_or(0) & 2 == 2 { "TOR" } else { "-TOR" },
-            if s["Features"].as_u64().unwrap_or(0) & 4 == 4 { "P2P" } else { "-P2P" },
-            if s["Features"].as_u64().unwrap_or(0) & 8 == 8 { "XOR" } else { "-XOR" },
-            if s["Features"].as_u64().unwrap_or(0) & 16 == 16 { "IPv6" } else { "-IPv6" },
+            if s["Features"].as_u64().unwrap_or(0) & 1 == 1 {
+                "SecureCore"
+            } else {
+                "-SecureCore"
+            },
+            if s["Features"].as_u64().unwrap_or(0) & 2 == 2 {
+                "TOR"
+            } else {
+                "-TOR"
+            },
+            if s["Features"].as_u64().unwrap_or(0) & 4 == 4 {
+                "P2P"
+            } else {
+                "-P2P"
+            },
+            if s["Features"].as_u64().unwrap_or(0) & 8 == 8 {
+                "XOR"
+            } else {
+                "-XOR"
+            },
+            if s["Features"].as_u64().unwrap_or(0) & 16 == 16 {
+                "IPv6"
+            } else {
+                "-IPv6"
+            },
         ];
 
         status == 1
@@ -182,7 +205,10 @@ fn regenerate_vpn_flow(
     servers.shuffle(&mut rng);
     let server = &servers[0];
 
-    println!("[INFO] Selected server: {}", server["Name"].as_str().unwrap_or(""));
+    println!(
+        "[INFO] Selected server: {}",
+        server["Name"].as_str().unwrap_or("")
+    );
 
     let keys = get_keys_from_protonvpn(client)?;
     let reg = register_config(client, server, &keys)?;
@@ -281,9 +307,18 @@ fn update_mikrotik_wg(
     }
 
     let commands = vec![
-        format!("/interface/wireguard/set wg1 private-key=\"{}\"", wg_private),
-        format!("/interface/wireguard/peers/set numbers=0 public-key=\"{}\"", peer_public),
-        format!("/interface/wireguard/peers/set numbers=0 endpoint-address=\"{}\"", endpoint_ip),
+        format!(
+            "/interface/wireguard/set wg1 private-key=\"{}\"",
+            wg_private
+        ),
+        format!(
+            "/interface/wireguard/peers/set numbers=0 public-key=\"{}\"",
+            peer_public
+        ),
+        format!(
+            "/interface/wireguard/peers/set numbers=0 endpoint-address=\"{}\"",
+            endpoint_ip
+        ),
     ];
 
     for cmd in commands {
