@@ -1,7 +1,6 @@
 use std::env;
 use std::io::Read;
 use std::net::TcpStream;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -68,13 +67,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main loop
     while running.load(std::sync::atomic::Ordering::SeqCst) {
-        if host_reachable("10.2.0.1") {
-            println!("[INFO] Host 10.2.0.1 is reachable, skipping flow.");
-            thread::sleep(Duration::from_secs(5));
-            continue;
+        // Port-checking logic on 51820 with logging
+        let mut fail_count = 0;
+        while fail_count < 5 && running.load(std::sync::atomic::Ordering::SeqCst) {
+            if host_reachable_port("10.2.0.1", 51820) {
+                fail_count = 0;
+                println!("[INFO] Host 10.2.0.1 reachable on port 51820");
+            } else {
+                fail_count += 1;
+                println!("[WARN] Host 10.2.0.1 not reachable on port 51820 (fail {}/{})", fail_count, 5);
+            }
+            thread::sleep(Duration::from_secs(10));
         }
 
-        println!("[INFO] Host unreachable, running ProtonVPN flow...");
+        if !running.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+
+        println!("[INFO] Host unreachable 5 times, running ProtonVPN flow...");
 
         // Fetch ProtonVPN servers
         let resp: Value = client
@@ -86,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("Expected LogicalServers array")?
             .to_owned();
 
-        // Filter servers by country/tier/features/Status
+        // Filter servers by country/tier/features/Status=1
         servers.retain(|s| {
             let entry_country = s["EntryCountry"].as_str().unwrap_or("");
             let exit_country = s["ExitCountry"].as_str().unwrap_or("");
@@ -174,18 +184,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Ping host with 30s timeout
-fn host_reachable(host: &str) -> bool {
-    println!("[INFO] Pinging host {}...", host);
-    let output = Command::new("ping")
-        .arg("-c")
-        .arg("1")
-        .arg("-W")
-        .arg("30")
-        .arg(host)
-        .output();
-    match output {
-        Ok(o) => o.status.success(),
+// Port check
+fn host_reachable_port(host: &str, port: u16) -> bool {
+    match TcpStream::connect((host, port)) {
+        Ok(_) => true,
         Err(_) => false,
     }
 }
