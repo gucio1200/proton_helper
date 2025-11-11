@@ -75,7 +75,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[INFO] Host 10.2.0.1 reachable on port 51820");
             } else {
                 fail_count += 1;
-                println!("[WARN] Host 10.2.0.1 not reachable on port 51820 (fail {}/{})", fail_count, 5);
+                println!(
+                    "[WARN] Host 10.2.0.1 not reachable on port 51820 (fail {}/{})",
+                    fail_count, 5
+                );
             }
             thread::sleep(Duration::from_secs(10));
         }
@@ -176,7 +179,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             reg["Features"]["peerPublicKey"].as_str().unwrap_or(""),
             endpoint_ip,
         )?;
-
     }
 
     println!("[INFO] Program terminated gracefully.");
