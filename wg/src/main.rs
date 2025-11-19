@@ -146,7 +146,7 @@ fn regenerate_vpn_flow(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Fetch ProtonVPN servers
     let resp: Value = client
-        .get("https://account.protonvpn.com/api/vpn/logicals")
+        .get("https://account.protonvpn.com/api/vpn/v1/logicals")
         .send()?
         .json()?;
     let mut servers: Vec<Value> = resp["LogicalServers"]
