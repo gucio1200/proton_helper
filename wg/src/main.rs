@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-pm-appversion",
-        HeaderValue::from_static("web-account@5.0.310.0"),
+        HeaderValue::from_static("web-account@5.0.313.0"),
     );
     headers.insert("x-pm-uid", HeaderValue::from_str(&auth_server)?);
     headers.insert(
