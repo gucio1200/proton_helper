@@ -16,6 +16,7 @@ jobs:
         docker:
           - wg
           - pnp
+          - kodi_ask
     steps:
       # Checkout repository
       - name: Checkout code
