@@ -27,19 +27,20 @@ async fn fetch_movies_from_kodi(movie_name: &str) -> Vec<OutputMovie> {
         "id": 1
     });
 
-    let resp = match client
-        .post(&kodi_url)
-        .json(&payload)
-        .send()
-        .await
-    {
+    let resp = match client.post(&kodi_url).json(&payload).send().await {
         Ok(r) => r,
-        Err(_) => return vec![],
+        Err(e) => {
+            println!("[ERROR] Failed HTTP request to Kodi: {}", e);
+            return vec![];
+        }
     };
 
     let json_resp: Value = match resp.json().await {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(e) => {
+            println!("[ERROR] Failed to parse Kodi JSON response: {}", e);
+            return vec![];
+        }
     };
 
     let movies = json_resp
@@ -80,6 +81,8 @@ async fn fetch_movies_from_kodi(movie_name: &str) -> Vec<OutputMovie> {
 async fn movies_endpoint(query: web::Query<HashMap<String, String>>) -> impl Responder {
     let movie_name = query.get("name").cloned().unwrap_or_default();
 
+    println!("[REQUEST] /movies?name={}", movie_name);
+
     let movies = fetch_movies_from_kodi(&movie_name).await;
 
     let out = json!({
@@ -88,6 +91,9 @@ async fn movies_endpoint(query: web::Query<HashMap<String, String>>) -> impl Res
             "movies": movies
         }
     });
+
+    // Pretty-print response for logs
+    println!("[RESPONSE] {}", serde_json::to_string_pretty(&out).unwrap());
 
     HttpResponse::Ok().json(out)
 }
