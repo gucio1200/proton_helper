@@ -85,14 +85,25 @@ async fn movies_endpoint(query: web::Query<HashMap<String, String>>) -> impl Res
 
     let movies = fetch_movies_from_kodi(&movie_name).await;
 
+    // Build number_to_id map and display options
+    let mut number_to_id = serde_json::Map::new();
+    let mut display_options = Vec::new();
+
+    for movie in &movies {
+        if let Some(mid) = movie.movieid {
+            number_to_id.insert(movie.index.to_string(), json!(mid));
+            display_options.push(format!("{}. {} ({})", movie.index, movie.title, movie.year));
+        }
+    }
+
     let out = json!({
         "state": "OK",
-        "attributes": {
-            "movies": movies
-        }
+        "movies": movies,
+        "number_to_id": number_to_id,
+        "display_options": display_options
     });
 
-    // Pretty-print response for logs
+    // Log response
     println!("[RESPONSE] {}", serde_json::to_string_pretty(&out).unwrap());
 
     HttpResponse::Ok().json(out)
