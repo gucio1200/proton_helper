@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use azure_identity::{WorkloadIdentityCredential, WorkloadIdentityCredentialOptions};
-use azure_core::credentials::TokenCredential; // Needed for get_token
+use azure_core::credentials::TokenCredential;
 use serde::Deserialize;
 use reqwest;
 
@@ -11,6 +11,10 @@ use reqwest;
 struct UpgradeItem {
     #[serde(rename = "orchestratorVersion")]
     orchestrator_version: String,
+    #[serde(rename = "orchestratorType", default)]
+    orchestrator_type: String,
+    #[serde(rename = "isPreview", default)]
+    is_preview: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -19,6 +23,8 @@ struct OrchestratorVersion {
     orchestrator_type: String,
     #[serde(rename = "orchestratorVersion")]
     orchestrator_version: String,
+    #[serde(default)]
+    default: bool,
     #[serde(default)]
     upgrades: Vec<UpgradeItem>,
 }
@@ -42,9 +48,14 @@ async fn main() -> anyhow::Result<()> {
     let subscription_id = std::env::var("AZ_SUBSCRIPTION_ID")?;
     let location = "eastus";
 
+    // ------------------------
+    // API version as variable
+    // ------------------------
+    let api_version = "2020-11-01";
+
     let url = format!(
-        "https://management.azure.com/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version=2019-04-01",
-        subscription_id, location
+        "https://management.azure.com/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
+        subscription_id, location, api_version
     );
 
     // 2. WorkloadIdentityCredential
@@ -67,12 +78,15 @@ async fn main() -> anyhow::Result<()> {
         .json::<OrchestratorsResponse>()
         .await?;
 
-    // 5. Print available versions and upgrades
+    // 5. Print available versions, default flag, and upgrades
     println!("Available Kubernetes Versions in {}:", location);
     for o in resp.properties.orchestrators {
-        println!("- {} ({})", o.orchestrator_version, o.orchestrator_type);
+        let default_str = if o.default { " (default)" } else { "" };
+        println!("- {} ({}){}", o.orchestrator_version, o.orchestrator_type, default_str);
+
         for u in &o.upgrades {
-            println!("  upgrade → {}", u.orchestrator_version);
+            let preview_str = if u.is_preview { " (preview)" } else { "" };
+            println!("  upgrade → {}{} [{}]", u.orchestrator_version, preview_str, u.orchestrator_type);
         }
     }
 
