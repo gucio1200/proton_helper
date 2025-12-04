@@ -1,4 +1,5 @@
 use crate::azure_client::token::refresh_and_cache_token;
+use crate::azure_client::AKS_API_VERSION;
 use crate::config::Config;
 use crate::errors::AksError;
 use actix_web::web;
@@ -14,9 +15,6 @@ use tracing::{error, info};
 pub const TOKEN_REFRESH_LEEWAY: TimeDuration = TimeDuration::seconds(65);
 const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55);
 const TOKEN_REFRESH_PROACTIVE_OFFSET: TimeDuration = TimeDuration::seconds(60);
-
-// Azure API constant needed for state management
-const AKS_API_VERSION: &str = "2020-11-01";
 
 // Token Cache Structures
 pub struct InternalCachedToken {
