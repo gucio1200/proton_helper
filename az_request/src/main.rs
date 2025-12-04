@@ -23,7 +23,6 @@ use tracing::{error, info, instrument, warn};
 // ----------------------
 const AKS_API_VERSION: &str = "2020-11-01";
 const ORCHESTRATOR_TYPE_K8S: &str = "Kubernetes";
-// FIX 1: Increased leeway to exceed the proactive offset (60s) to prevent a token race condition
 const TOKEN_REFRESH_LEEWAY: TimeDuration = TimeDuration::seconds(65);
 const AZURE_MGMT_SCOPE: &str = "https://management.azure.com/.default";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
@@ -60,7 +59,12 @@ impl Config {
     fn from_env() -> Result<Self, AksError> {
         match Config::try_parse() {
             Ok(config) => Ok(config),
-            Err(e) => Err(AksError::Config(format!("Configuration error: {e}"))),
+            Err(e) => {
+                if e.kind() == clap::error::ErrorKind::DisplayHelp || e.kind() == clap::error::ErrorKind::DisplayVersion {
+                    e.exit(); 
+                }
+                Err(AksError::Config(format!("Configuration error: {e}")))
+            }
         }
     }
 }
