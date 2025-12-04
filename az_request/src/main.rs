@@ -246,8 +246,8 @@ async fn fetch_with_retry(
     location: String,
     token: String,
 ) -> Result<Vec<Orchestrator>, AksError> {
+    let mut rng = rand::rng();
     let strategy = ExponentialBackoff::from_millis(50).take(5).map(move |d| {
-        let mut rng = rand::rng();
         let jitter = rng.random_range(0..30);
         d + Duration::from_millis(jitter as u64)
     });
@@ -292,10 +292,11 @@ async fn aks_versions(
 
     let client = data.http_client.clone();
     let sub_id = data.config.subscription_id.to_owned();
+    let cache_key_owned = location_key.to_owned();
 
     let list = data
         .cache
-        .try_get_with(location_key.to_owned(), async move {
+        .try_get_with(cache_key_owned, async move {
             fetch_with_retry(client, sub_id, location_key, token).await
         })
         .await
