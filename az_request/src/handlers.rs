@@ -122,29 +122,32 @@ pub async fn aks_versions(
 // Combined status endpoint for liveness and readiness, checking token validity
 #[get("/status")]
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
-    use crate::azure_client::token::get_token_from_cache;
+    // --- UPDATED: Use the new get_token_status for detailed information ---
+    use crate::azure_client::token::get_token_status; 
     use time::OffsetDateTime;
 
     let uptime = OffsetDateTime::now_utc() - state.start_time;
-    let token_ok = get_token_from_cache(&state.token_cache).is_some();
-    let mut status_code;
-    let status_message;
-    let token_status_message;
-
-    if token_ok {
-        status_code = HttpResponse::Ok();
-        status_message = "healthy";
-        token_status_message = "ok";
+    let token_status = get_token_status(&state.token_cache);
+    
+    // Readiness: The service is ready if a valid token is in the cache.
+    let is_ready = token_status.is_valid;
+    
+    let mut http_status = if is_ready {
+        HttpResponse::Ok()
     } else {
-        // If token is missing/expired, it's a Service Unavailable error (503) for liveness/health
-        status_code = HttpResponse::ServiceUnavailable();
-        status_message = "unhealthy";
-        token_status_message = "Azure access token is missing or expired.";
-    }
+        HttpResponse::ServiceUnavailable()
+    };
 
-    status_code.json(serde_json::json!({
-        "status": status_message,
-        "token_status": token_status_message,
+    http_status.json(serde_json::json!({
+        "status": if is_ready { "healthy" } else { "unhealthy" },
+        "message": if is_ready { 
+            "Service is operational and has a valid Azure token." 
+        } else { 
+            "Azure access token is missing or expired." 
+        },
         "uptime_seconds": uptime.whole_seconds(),
+        "token_expires_at_utc": token_status.expires_at_utc.map(|t| t.to_string()),
+        "token_valid_for_use": is_ready,
     }))
+    // ----------------------------------------------------------------------
 }
