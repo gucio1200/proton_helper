@@ -26,9 +26,6 @@ pub enum AksError {
     #[error("Location parameter cannot be empty")]
     Validation,
 
-    #[error("Configuration error: {0}")]
-    Config(String),
-
     #[error("HTTP client initialization failed: {0}")]
     ClientBuild(String),
 }

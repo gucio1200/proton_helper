@@ -14,6 +14,7 @@ use azure_client::token::refresh_and_cache_token;
 use config::Config;
 use handlers::{aks_versions, healthz, readyz};
 use state::AppState;
+use clap::Parser;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -22,7 +23,7 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    let config = Config::from_env()?;
+    let config = Config::parse();
 
     info!(
         port = config.port,
