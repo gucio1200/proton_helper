@@ -1,3 +1,5 @@
+// [./state.rs]:
+
 use crate::azure_client::token::refresh_and_cache_token;
 use crate::azure_client::AKS_API_VERSION;
 use crate::config::Config;
@@ -85,8 +87,15 @@ impl AppState {
         Ok(cred)
     }
 
+    // UPDATED: Added self.show_preview to the cache key
     pub fn cache_key(&self, location: &str) -> String {
-        format!("{}:{}:{}", self.subscription_id, location, AKS_API_VERSION)
+        format!(
+            "{}:{}:{}:{}", 
+            self.subscription_id, 
+            location, 
+            AKS_API_VERSION,
+            self.show_preview // <-- NEW: Include show_preview setting
+        )
     }
 }
 

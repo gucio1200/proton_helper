@@ -1,3 +1,5 @@
+// [./handlers.rs]:
+
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
 use reqwest::Response;
@@ -79,7 +81,7 @@ async fn process_orchestrator_response(
 }
 
 // HTTP HANDLERS
-#[get("/")]
+#[get("/versions")] // <-- CHANGED from #[get("/")]
 #[instrument(skip(state, req_id), fields(location = %query.location))]
 pub async fn aks_versions(
     query: web::Query<LocationQuery>,
@@ -117,30 +119,32 @@ pub async fn aks_versions(
     }))
 }
 
-#[get("/healthz")]
-pub async fn healthz(state: web::Data<AppState>) -> impl Responder {
+// Combined status endpoint for liveness and readiness, checking token validity
+#[get("/status")]
+pub async fn status(state: web::Data<AppState>) -> impl Responder {
     use crate::azure_client::token::get_token_from_cache;
     use time::OffsetDateTime;
 
     let uptime = OffsetDateTime::now_utc() - state.start_time;
+    let token_ok = get_token_from_cache(&state.token_cache).is_some();
+    let mut status_code;
+    let status_message;
+    let token_status_message;
 
-    if get_token_from_cache(&state.token_cache).is_some() {
-        HttpResponse::Ok().json(serde_json::json!({
-            "status": "healthy",
-            "uptime_seconds": uptime.whole_seconds(),
-        }))
+    if token_ok {
+        status_code = HttpResponse::Ok();
+        status_message = "healthy";
+        token_status_message = "ok";
     } else {
-        HttpResponse::ServiceUnavailable().json(serde_json::json!({
-            "status": "unhealthy",
-            "message": "Azure access token is missing or expired.",
-            "uptime_seconds": uptime.whole_seconds(),
-        }))
+        // If token is missing/expired, it's a Service Unavailable error (503) for liveness/health
+        status_code = HttpResponse::ServiceUnavailable();
+        status_message = "unhealthy";
+        token_status_message = "Azure access token is missing or expired.";
     }
-}
 
-#[get("/readyz")]
-pub async fn readyz() -> impl Responder {
-    HttpResponse::Ok().json(serde_json::json!({
-        "status": "ready"
+    status_code.json(serde_json::json!({
+        "status": status_message,
+        "token_status": token_status_message,
+        "uptime_seconds": uptime.whole_seconds(),
     }))
 }

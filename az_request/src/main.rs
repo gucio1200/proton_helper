@@ -1,3 +1,5 @@
+// [./main.rs]:
+
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use anyhow::Result;
 use tracing::info;
@@ -12,7 +14,7 @@ mod state;
 use actix_request_identifier::RequestIdentifier;
 use azure_client::token::refresh_and_cache_token;
 use config::Config;
-use handlers::{aks_versions, healthz, readyz};
+use handlers::{aks_versions, status}; 
 use state::AppState;
 use clap::Parser;
 
@@ -56,9 +58,8 @@ async fn main() -> Result<()> {
             .app_data(app_data.clone())
             .wrap(RequestIdentifier::with_uuid())
             .wrap(Logger::default())
-            .service(aks_versions)
-            .service(healthz)
-            .service(readyz)
+            .service(aks_versions) // Registers the /versions endpoint
+            .service(status) 
     })
     .bind(bind_addr)?
     .run()
