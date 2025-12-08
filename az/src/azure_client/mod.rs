@@ -1,5 +1,3 @@
-// [./src/azure_client/mod.rs]
-
 use crate::errors::{AksError, AzureErrorBody};
 use reqwest::Client; // Removed 'Response'
 use semver::Version;
@@ -12,7 +10,6 @@ pub mod token;
 pub const AKS_API_VERSION: &str = "2020-11-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 
-// ... (Rest of the file remains the same as previous step)
 #[derive(Deserialize)]
 struct OrchestratorsResponse { properties: Properties }
 #[derive(Deserialize)]

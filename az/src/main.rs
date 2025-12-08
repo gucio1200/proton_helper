@@ -1,5 +1,3 @@
-// [./src/main.rs]
-
 use actix_request_identifier::RequestIdentifier;
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use anyhow::Result;

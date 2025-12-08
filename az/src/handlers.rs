@@ -1,5 +1,3 @@
-// [./src/handlers.rs]
-
 use crate::azure_client::retry::fetch_versions_with_retry;
 use crate::errors::AksError;
 use crate::state::AppState;
@@ -9,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 use tracing::instrument;
 
-// FIX: Added Debug for instrument macro
 #[derive(Deserialize, Debug)]
 pub struct LocationQuery {
     pub location: String,
@@ -57,7 +54,6 @@ pub async fn aks_versions(
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
     let report = state.get_health();
     
-    // FIX: Added 'mut' because .json() borrows mutably
     let mut status_code = if report.status == "healthy" {
         HttpResponse::Ok()
     } else {

@@ -1,5 +1,3 @@
-// [./src/azure_client/token.rs]
-
 use crate::errors::AksError;
 use arc_swap::ArcSwap;
 use azure_core::credentials::TokenCredential;
@@ -8,8 +6,6 @@ use time::OffsetDateTime;
 use tracing::instrument;
 
 const AZURE_MGMT_SCOPE: &str = "https://management.azure.com/.default";
-
-// --- MOVED DEFINITIONS HERE TO BREAK CYCLE ---
 
 pub struct InternalCachedToken {
     pub token: Arc<str>,
@@ -25,7 +21,6 @@ impl InternalCachedToken {
     }
 }
 
-// Define the type alias here so both State and Worker can use it without cycling
 pub type TokenCache = ArcSwap<Option<InternalCachedToken>>;
 
 // --- LOGIC ---
@@ -62,7 +57,6 @@ pub fn get_token_from_cache(cache: &TokenCache) -> Option<Arc<str>> {
     None
 }
 
-// Helper for status endpoint
 pub struct TokenStatus {
     pub is_valid: bool,
     pub expires_at_utc: Option<OffsetDateTime>,

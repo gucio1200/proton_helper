@@ -36,7 +36,6 @@ async fn run_worker(state: Arc<AppState>) {
 
         if should_refresh {
             info!("Refreshing token...");
-            // Note: We drop 'guard' implicitly here before awaiting, which is good.
             if let Err(e) =
                 refresh_and_cache_token(&*state.credential, &state.token_cache).await
             {

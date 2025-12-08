@@ -76,10 +76,8 @@ impl AppState {
         let last_beat = self.worker_last_heartbeat.load(Ordering::Relaxed);
         let heartbeat_age = now.unix_timestamp() - last_beat;
 
-        // Retrieve full status
         let token_status = get_token_status(&self.token_cache);
         
-        // Use values
         let token_valid = token_status.is_valid;
         let worker_alive = heartbeat_age < WORKER_LIVENESS_THRESHOLD;
         let is_healthy = token_valid && worker_alive;
