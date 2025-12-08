@@ -54,12 +54,11 @@ impl AppState {
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
         // Create the credential struct (this is NOT an Arc yet)
-        let credential_struct = WorkloadIdentityCredential::new(Some(
-            WorkloadIdentityCredentialOptions::default(),
-        ))
-        .map_err(|e| AksError::AzureClient {
-            message: e.to_string(),
-        })?;
+        let credential_struct =
+            WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions::default()))
+                .map_err(|e| AksError::AzureClient {
+                    message: e.to_string(),
+                })?;
 
         Ok(Self {
             show_preview: config.show_preview,
@@ -77,7 +76,10 @@ impl AppState {
     }
 
     pub fn cache_key(&self, location: &str) -> String {
-        format!("{}:{}:{}", self.subscription_id, location, self.show_preview)
+        format!(
+            "{}:{}:{}",
+            self.subscription_id, location, self.show_preview
+        )
     }
 
     pub fn get_health(&self) -> HealthReport {

@@ -55,9 +55,7 @@ async fn run_worker(state: Arc<AppState>) {
             // Drop guard before awaiting to avoid holding the lock
             drop(guard);
 
-            if let Err(e) =
-                refresh_and_cache_token(&*state.credential, &state.token_cache).await
-            {
+            if let Err(e) = refresh_and_cache_token(&*state.credential, &state.token_cache).await {
                 error!("Refresh failed: {e}. Will retry in next interval.");
             }
         }
