@@ -2,10 +2,19 @@ use crate::errors::AksError;
 use arc_swap::ArcSwap;
 use azure_core::credentials::TokenCredential;
 use std::sync::Arc;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use tracing::instrument;
 
 const AZURE_MGMT_SCOPE: &str = "https://management.azure.com/.default";
+
+// --- CRITICAL SAFETY CONSTANTS ---
+//
+// 1. HTTP Handler Safety (65s):
+//    We consider a token "dead" if it expires in less than 65s.
+//    This allows for clock skew and network latency during the Azure request.
+pub const TOKEN_REFRESH_LEEWAY: Duration = Duration::seconds(65);
+
+// --- Token Cache Structures ---
 
 pub struct InternalCachedToken {
     pub token: Arc<str>,
@@ -23,7 +32,7 @@ impl InternalCachedToken {
 
 pub type TokenCache = ArcSwap<Option<InternalCachedToken>>;
 
-// --- LOGIC ---
+// --- Logic ---
 
 #[instrument(skip(credential, cache))]
 pub async fn refresh_and_cache_token(
@@ -48,9 +57,7 @@ pub async fn refresh_and_cache_token(
 pub fn get_token_from_cache(cache: &TokenCache) -> Option<Arc<str>> {
     let cached_arc = cache.load();
     if let Some(cached) = cached_arc.as_ref() {
-        // Simple check: is it expired right now?
-        // Detailed lifecycle logic is handled by the worker/state.
-        if cached.expires_at > OffsetDateTime::now_utc() {
+        if cached.expires_at > OffsetDateTime::now_utc() + TOKEN_REFRESH_LEEWAY {
             return Some(Arc::clone(&cached.token));
         }
     }
@@ -66,7 +73,7 @@ pub fn get_token_status(cache: &TokenCache) -> TokenStatus {
     let cached_arc = cache.load();
     match cached_arc.as_ref() {
         Some(cached) => TokenStatus {
-            is_valid: cached.expires_at > OffsetDateTime::now_utc(),
+            is_valid: cached.expires_at > OffsetDateTime::now_utc() + TOKEN_REFRESH_LEEWAY,
             expires_at_utc: Some(cached.expires_at),
         },
         None => TokenStatus {

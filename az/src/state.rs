@@ -10,6 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 
+// 1. Worker Liveness (140s):
+//    Used by the /status endpoint.
+//    If the background worker hasn't updated the heartbeat in ~2.5 intervals (2.5 * 55s),
+//    we assume the thread has crashed/stalled and mark the service unhealthy.
 pub const WORKER_LIVENESS_THRESHOLD: i64 = 140;
 
 pub struct AppState {
@@ -20,6 +24,9 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub subscription_id: String,
     pub start_time: OffsetDateTime,
+
+    // Tracks the last time the background worker successfully looped.
+    // Checked by the /status endpoint to ensure the refresh logic is actually running.
     pub worker_last_heartbeat: AtomicI64,
 }
 
@@ -46,7 +53,8 @@ impl AppState {
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
-        let credential = WorkloadIdentityCredential::new(Some(
+        // Create the credential struct (this is NOT an Arc yet)
+        let credential_struct = WorkloadIdentityCredential::new(Some(
             WorkloadIdentityCredentialOptions::default(),
         ))
         .map_err(|e| AksError::AzureClient {
@@ -59,7 +67,8 @@ impl AppState {
                 .time_to_live(Duration::from_secs(config.cache_ttl_seconds))
                 .build(),
             token_cache: ArcSwap::new(Arc::new(None)),
-            credential: credential,
+            // Wrap in Arc explicitly here
+            credential: credential_struct,
             http_client,
             subscription_id: config.subscription_id,
             start_time: OffsetDateTime::now_utc(),
@@ -77,7 +86,7 @@ impl AppState {
         let heartbeat_age = now.unix_timestamp() - last_beat;
 
         let token_status = get_token_status(&self.token_cache);
-        
+
         let token_valid = token_status.is_valid;
         let worker_alive = heartbeat_age < WORKER_LIVENESS_THRESHOLD;
         let is_healthy = token_valid && worker_alive;
@@ -90,7 +99,6 @@ impl AppState {
             },
             uptime_seconds: (now - self.start_time).whole_seconds(),
             heartbeat_age,
-            // Map the field to String (ISO 8601) to satisfy the warning and provide data
             token_expires_at: token_status.expires_at_utc.map(|t| t.to_string()),
         }
     }

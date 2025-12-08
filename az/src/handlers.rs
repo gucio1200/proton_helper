@@ -53,12 +53,12 @@ pub async fn aks_versions(
 #[get("/status")]
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
     let report = state.get_health();
-    
+
     let mut status_code = if report.status == "healthy" {
         HttpResponse::Ok()
     } else {
         HttpResponse::ServiceUnavailable()
     };
-    
+
     status_code.json(report)
 }

@@ -1,5 +1,5 @@
 use crate::errors::{AksError, AzureErrorBody};
-use reqwest::Client; // Removed 'Response'
+use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -10,10 +10,15 @@ pub mod token;
 pub const AKS_API_VERSION: &str = "2020-11-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 
+// --- Internal structs (Hidden from handlers) ---
 #[derive(Deserialize)]
-struct OrchestratorsResponse { properties: Properties }
+struct OrchestratorsResponse {
+    properties: Properties,
+}
 #[derive(Deserialize)]
-struct Properties { orchestrators: Vec<OrchestratorItem> }
+struct Properties {
+    orchestrators: Vec<OrchestratorItem>,
+}
 #[derive(Deserialize)]
 struct OrchestratorItem {
     #[serde(rename = "orchestratorType")]
@@ -23,6 +28,8 @@ struct OrchestratorItem {
     #[serde(rename = "isPreview", default)]
     is_preview: bool,
 }
+
+// --- Logic ---
 
 pub async fn fetch_and_parse(
     client: &Client,
@@ -36,8 +43,14 @@ pub async fn fetch_and_parse(
         AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
     );
 
-    let resp = client.get(&url).bearer_auth(token).send().await
-        .map_err(|e| AksError::AzureClient { message: e.to_string() })?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| AksError::AzureClient {
+            message: e.to_string(),
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -46,13 +59,22 @@ pub async fn fetch_and_parse(
         let msg = serde_json::from_str::<AzureErrorBody>(&body)
             .map(|e| e.error.to_string())
             .unwrap_or(body);
-        return Err(AksError::AzureHttp { status, message: msg, url });
+        return Err(AksError::AzureHttp {
+            status,
+            message: msg,
+            url,
+        });
     }
 
-    let json: OrchestratorsResponse = resp.json().await
+    let json: OrchestratorsResponse = resp
+        .json()
+        .await
         .map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
-    let mut versions: Vec<Version> = json.properties.orchestrators.into_iter()
+    let mut versions: Vec<Version> = json
+        .properties
+        .orchestrators
+        .into_iter()
         .filter(|o| o.type_ == "Kubernetes" && (show_preview || !o.is_preview))
         .map(|o| Version::parse(&o.version))
         .collect::<Result<Vec<_>, _>>()

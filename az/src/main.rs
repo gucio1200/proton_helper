@@ -29,12 +29,13 @@ async fn main() -> Result<()> {
     let state = AppState::new(config.clone())?;
     let app_data = web::Data::new(state);
 
-    // Initial Token
+    // Initial Token Sync Fetch
     info!("Acquiring initial token...");
     refresh_and_cache_token(app_data.credential.as_ref(), &app_data.token_cache)
         .await
         .map_err(|e| anyhow::anyhow!("Initial token fail: {}", e))?;
 
+    // Start Background Supervisor
     worker::start(app_data.clone());
 
     HttpServer::new(move || {
