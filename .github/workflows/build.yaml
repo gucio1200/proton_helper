@@ -17,6 +17,7 @@ jobs:
           - wg
           - pnp
           - kodi_ask
+          - az
     steps:
       # Checkout repository
       - name: Checkout code
