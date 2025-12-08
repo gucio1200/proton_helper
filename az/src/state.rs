@@ -53,7 +53,6 @@ impl AppState {
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
-        // Create the credential struct (this is NOT an Arc yet)
         let credential_struct =
             WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions::default()))
                 .map_err(|e| AksError::AzureClient {
@@ -66,7 +65,6 @@ impl AppState {
                 .time_to_live(Duration::from_secs(config.cache_ttl_seconds))
                 .build(),
             token_cache: ArcSwap::new(Arc::new(None)),
-            // Wrap in Arc explicitly here
             credential: credential_struct,
             http_client,
             subscription_id: config.subscription_id,
