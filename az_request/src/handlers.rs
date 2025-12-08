@@ -1,16 +1,17 @@
-// [./handlers.rs]:
-
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
 use reqwest::Response;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use std::{ops::Deref, sync::Arc};
+use time::OffsetDateTime;
 use tracing::instrument;
 
 use crate::azure_client::retry::fetch_with_retry;
+use crate::azure_client::token::get_token_status;
 use crate::errors::AksError;
-use crate::state::AppState;
+use crate::state::{AppState, WORKER_LIVENESS_THRESHOLD};
 
 // Constants used for filtering
 const ORCHESTRATOR_TYPE_K8S: &str = "Kubernetes";
@@ -81,7 +82,7 @@ async fn process_orchestrator_response(
 }
 
 // HTTP HANDLERS
-#[get("/versions")] // <-- CHANGED from #[get("/")]
+#[get("/versions")]
 #[instrument(skip(state, req_id), fields(location = %query.location))]
 pub async fn aks_versions(
     query: web::Query<LocationQuery>,
@@ -119,19 +120,26 @@ pub async fn aks_versions(
     }))
 }
 
-// Combined status endpoint for liveness and readiness, checking token validity
+// Combined status endpoint for liveness and readiness
 #[get("/status")]
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
-    // --- UPDATED: Use the new get_token_status for detailed information ---
-    use crate::azure_client::token::get_token_status; 
-    use time::OffsetDateTime;
-
-    let uptime = OffsetDateTime::now_utc() - state.start_time;
+    let now = OffsetDateTime::now_utc();
+    let uptime = now - state.start_time;
     let token_status = get_token_status(&state.token_cache);
-    
-    // Readiness: The service is ready if a valid token is in the cache.
-    let is_ready = token_status.is_valid;
-    
+
+    // 1. Check Token Validity
+    let token_valid = token_status.is_valid;
+
+    // 2. Check Worker Liveness
+    let last_beat = state.worker_last_heartbeat.load(Ordering::Relaxed);
+    let heartbeat_age = now.unix_timestamp() - last_beat;
+
+    // The worker is considered healthy if it has reported in recently
+    let worker_healthy = heartbeat_age < WORKER_LIVENESS_THRESHOLD;
+
+    // The Service is Ready only if BOTH token is valid AND worker is alive
+    let is_ready = token_valid && worker_healthy;
+
     let mut http_status = if is_ready {
         HttpResponse::Ok()
     } else {
@@ -140,14 +148,21 @@ pub async fn status(state: web::Data<AppState>) -> impl Responder {
 
     http_status.json(serde_json::json!({
         "status": if is_ready { "healthy" } else { "unhealthy" },
-        "message": if is_ready { 
-            "Service is operational and has a valid Azure token." 
-        } else { 
-            "Azure access token is missing or expired." 
+        "checks": {
+            "token_valid": token_valid,
+            "worker_alive": worker_healthy
         },
-        "uptime_seconds": uptime.whole_seconds(),
-        "token_expires_at_utc": token_status.expires_at_utc.map(|t| t.to_string()),
-        "token_valid_for_use": is_ready,
+        "details": {
+            "message": if is_ready {
+                "Service operational."
+            } else if !token_valid {
+                "Azure token missing/expired."
+            } else {
+                "Background worker stalled."
+            },
+            "heartbeat_age_seconds": heartbeat_age,
+            "uptime_seconds": uptime.whole_seconds(),
+            "token_expires_at_utc": token_status.expires_at_utc.map(|t| t.to_string()),
+        }
     }))
-    // ----------------------------------------------------------------------
 }

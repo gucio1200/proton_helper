@@ -1,22 +1,17 @@
-// [./main.rs]:
-
 use actix_web::{middleware::Logger, web, App, HttpServer};
 use anyhow::Result;
 use tracing::info;
-
-// Internal Modules
 mod azure_client;
 mod config;
 mod errors;
 mod handlers;
 mod state;
-
 use actix_request_identifier::RequestIdentifier;
 use azure_client::token::refresh_and_cache_token;
-use config::Config;
-use handlers::{aks_versions, status}; 
-use state::AppState;
 use clap::Parser;
+use config::Config;
+use handlers::{aks_versions, status};
+use state::AppState;
 
 #[actix_web::main]
 async fn main() -> Result<()> {
@@ -58,8 +53,8 @@ async fn main() -> Result<()> {
             .app_data(app_data.clone())
             .wrap(RequestIdentifier::with_uuid())
             .wrap(Logger::default())
-            .service(aks_versions) // Registers the /versions endpoint
-            .service(status) 
+            .service(aks_versions)
+            .service(status)
     })
     .bind(bind_addr)?
     .run()

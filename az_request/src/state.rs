@@ -1,5 +1,3 @@
-// [./state.rs]:
-
 use crate::azure_client::token::refresh_and_cache_token;
 use crate::azure_client::AKS_API_VERSION;
 use crate::config::Config;
@@ -8,17 +6,34 @@ use actix_web::web;
 use arc_swap::ArcSwap;
 use azure_identity::{WorkloadIdentityCredential, WorkloadIdentityCredentialOptions};
 use moka::future::Cache;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::{sync::Arc, time::Duration};
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tokio::time::interval;
-use tracing::{error, info};
+use tracing::{error, info, instrument, warn};
 
-// Token management constants
+// Token Validity Rules
+// The HTTP handler will reject the token if it expires in less than 65 seconds.
+// This prevents the token from expiring mid-flight during a request to Azure.
 pub const TOKEN_REFRESH_LEEWAY: TimeDuration = TimeDuration::seconds(65);
-const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55);
-const TOKEN_REFRESH_PROACTIVE_OFFSET: TimeDuration = TimeDuration::seconds(60);
 
-// Token Cache Structures
+// 2. WORKER INTERVAL
+// The background worker wakes up every 55 seconds to check the token.
+const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55);
+
+// 3. REFRESH TRIGGER
+// We must attempt to refresh if the token has less than 130 seconds left.
+// Calculation: 65s (Leeway) + 55s (Interval) + 10s (Safety Buffer) = 130s.
+// This guarantees we refresh BEFORE the Leeway threshold is reached.
+const TOKEN_REFRESH_PROACTIVE_OFFSET: TimeDuration = TimeDuration::seconds(130);
+
+// Worker Liveness Threshold for the Status Endpoint
+// If the worker hasn't updated the heartbeat in ~2.5 intervals, consider it dead.
+pub const WORKER_LIVENESS_THRESHOLD: i64 = 140;
+const SUPERVISOR_RESTART_DELAY: Duration = Duration::from_secs(2);
+
+// --- Token Cache Structures ---
+
 pub struct InternalCachedToken {
     pub token: Arc<str>,
     pub expires_at: OffsetDateTime,
@@ -43,7 +58,8 @@ impl InternalCachedToken {
 
 pub type TokenCache = ArcSwap<Option<InternalCachedToken>>;
 
-// Application State
+// --- Application State ---
+
 pub struct AppState {
     pub show_preview: bool,
     pub cache: Cache<String, Arc<[String]>>,
@@ -52,6 +68,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub subscription_id: String,
     pub start_time: OffsetDateTime,
+    pub worker_last_heartbeat: AtomicI64,
 }
 
 impl AppState {
@@ -75,6 +92,7 @@ impl AppState {
             http_client,
             subscription_id: config.subscription_id,
             start_time: OffsetDateTime::now_utc(),
+            worker_last_heartbeat: AtomicI64::new(OffsetDateTime::now_utc().unix_timestamp()),
         })
     }
 
@@ -87,46 +105,74 @@ impl AppState {
         Ok(cred)
     }
 
-    // UPDATED: Added self.show_preview to the cache key
     pub fn cache_key(&self, location: &str) -> String {
         format!(
-            "{}:{}:{}:{}", 
-            self.subscription_id, 
-            location, 
-            AKS_API_VERSION,
-            self.show_preview // <-- NEW: Include show_preview setting
+            "{}:{}:{}:{}",
+            self.subscription_id, location, AKS_API_VERSION, self.show_preview
         )
     }
 }
 
-// Background Refresher Logic
-pub fn start_token_refresher(app_state: web::Data<AppState>) {
-    let app_data = app_state.clone();
+// --- Supervisor & Worker Implementation ---
 
-    tokio::spawn(async move {
-        let mut interval = interval(TOKEN_REFRESH_INTERVAL);
+#[instrument(skip(app_state), fields(component = "token_worker"))]
+async fn run_refresher_worker(app_state: Arc<AppState>) {
+    let mut interval = interval(TOKEN_REFRESH_INTERVAL);
 
-        let credential = app_data.credential.as_ref();
-        let token_cache = &app_data.token_cache;
+    let credential = app_state.credential.clone();
+    let token_cache = &app_state.token_cache;
 
-        loop {
-            interval.tick().await;
+    info!("Token refresher worker started.");
 
-            let needs_refresh = {
-                let cached_arc = token_cache.load();
-                match cached_arc.as_ref() {
-                    Some(cached) => cached.needs_refresh(),
-                    None => true,
-                }
-            };
+    loop {
+        interval.tick().await;
+        app_state.worker_last_heartbeat.store(
+            OffsetDateTime::now_utc().unix_timestamp(),
+            Ordering::Relaxed,
+        );
 
-            if needs_refresh {
-                info!("Proactively refreshing token...");
-                if let Err(e) = refresh_and_cache_token(credential, token_cache).await {
-                    error!(error = %e, "Background token refresh failed. Retrying later.");
-                }
+        let needs_refresh = {
+            let cached_arc = token_cache.load();
+            match cached_arc.as_ref() {
+                Some(cached) => cached.needs_refresh(),
+                None => true,
+            }
+        };
+
+        if needs_refresh {
+            info!("Proactively refreshing token...");
+            if let Err(e) = refresh_and_cache_token(&*credential, token_cache).await {
+                error!(error = %e, "Background token refresh failed. Retrying in next cycle.");
             }
         }
+    }
+}
+
+pub fn start_token_refresher(app_state: web::Data<AppState>) {
+    let state_arc = app_state.into_inner();
+
+    tokio::spawn(async move {
+        info!("Token Supervisor started.");
+
+        loop {
+            let worker_state = state_arc.clone();
+            let handle = tokio::spawn(run_refresher_worker(worker_state));
+
+            match handle.await {
+                Ok(_) => {
+                    warn!("Token refresher worker exited unexpectedly (Clean Exit). Restarting...");
+                }
+                Err(e) => {
+                    if e.is_panic() {
+                        error!(
+                            "CRITICAL: Token refresher worker PANICKED. Restarting supervisor..."
+                        );
+                    } else {
+                        error!(error = %e, "Token refresher worker task failed/cancelled. Restarting...");
+                    }
+                }
+            }
+            tokio::time::sleep(SUPERVISOR_RESTART_DELAY).await;
+        }
     });
-    info!("Background token refresher spawned.");
 }

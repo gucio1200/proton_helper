@@ -18,5 +18,3 @@ pub struct Config {
     #[arg(long, env = "CACHE_TTL_SECONDS", default_value_t = 3600)]
     pub cache_ttl_seconds: u64,
 }
-
-//impl Config {}

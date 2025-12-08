@@ -1,11 +1,9 @@
-// [./azure_client/token.rs]:
-
 use crate::errors::AksError;
 use crate::state::InternalCachedToken;
 use crate::state::TokenCache;
 use azure_core::credentials::TokenCredential;
 use std::sync::Arc;
-use time::OffsetDateTime; // <-- ADDED: Need this for the TokenStatus struct
+use time::OffsetDateTime;
 use tracing::instrument;
 
 const AZURE_MGMT_SCOPE: &str = "https://management.azure.com/.default";
@@ -40,8 +38,6 @@ pub fn get_token_from_cache(cache: &TokenCache) -> Option<Arc<str>> {
     None
 }
 
-// --- NEW STRUCT AND FUNCTION FOR STATUS ENDPOINT ---
-/// Represents the detailed validity status of the cached Azure token.
 pub struct TokenStatus {
     pub is_valid: bool,
     pub expires_at_utc: Option<OffsetDateTime>,
@@ -61,4 +57,3 @@ pub fn get_token_status(cache: &TokenCache) -> TokenStatus {
         },
     }
 }
-// ----------------------------------------------------
