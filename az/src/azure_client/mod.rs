@@ -1,68 +1,68 @@
+// [./src/azure_client/mod.rs]
+
 use crate::errors::{AksError, AzureErrorBody};
-use reqwest::{Client, Response};
-use tracing::instrument;
+use reqwest::Client; // Removed 'Response'
+use semver::Version;
+use serde::Deserialize;
+use std::sync::Arc;
 
-// Azure API Constants
+pub mod retry;
+pub mod token;
+
 pub const AKS_API_VERSION: &str = "2020-11-01";
-pub const AZURE_MGMT_BASE: &str = "https://management.azure.com";
+const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 
-#[inline]
-fn build_orchestrators_url(subscription_id: &str, location: &str) -> String {
-    format!(
-        "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
-        AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
-    )
+// ... (Rest of the file remains the same as previous step)
+#[derive(Deserialize)]
+struct OrchestratorsResponse { properties: Properties }
+#[derive(Deserialize)]
+struct Properties { orchestrators: Vec<OrchestratorItem> }
+#[derive(Deserialize)]
+struct OrchestratorItem {
+    #[serde(rename = "orchestratorType")]
+    type_: String,
+    #[serde(rename = "orchestratorVersion")]
+    version: String,
+    #[serde(rename = "isPreview", default)]
+    is_preview: bool,
 }
 
-#[instrument(skip(resp))]
-pub async fn handle_azure_response(resp: Response) -> Result<Response, AksError> {
-    let status = resp.status();
-
-    if !status.is_success() {
-        let url = resp.url().to_string();
-        let status_code = status.as_u16();
-
-        let body = resp.text().await.unwrap_or_else(|_| "No body".to_string());
-
-        if let Ok(azure_err) = serde_json::from_str::<AzureErrorBody>(&body) {
-            Err(AksError::AzureHttp {
-                status: status_code,
-                message: azure_err.error.to_string(),
-                url,
-            })
-        } else {
-            Err(AksError::AzureHttp {
-                status: status_code,
-                message: format!("HTTP response error body unparsable. Body: {}", body),
-                url,
-            })
-        }
-    } else {
-        Ok(resp)
-    }
-}
-
-#[instrument(skip(client, token), fields(location = %location))]
-pub async fn fetch_aks_versions(
+pub async fn fetch_and_parse(
     client: &Client,
     subscription_id: &str,
     location: &str,
     token: &str,
-) -> Result<Response, AksError> {
-    let url = build_orchestrators_url(subscription_id, location);
+    show_preview: bool,
+) -> Result<Arc<[String]>, AksError> {
+    let url = format!(
+        "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
+        AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
+    );
 
-    let resp = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| AksError::AzureClient {
-            message: format!("Request failed: {e}"),
-        })?;
+    let resp = client.get(&url).bearer_auth(token).send().await
+        .map_err(|e| AksError::AzureClient { message: e.to_string() })?;
 
-    handle_azure_response(resp).await
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let url = resp.url().to_string();
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<AzureErrorBody>(&body)
+            .map(|e| e.error.to_string())
+            .unwrap_or(body);
+        return Err(AksError::AzureHttp { status, message: msg, url });
+    }
+
+    let json: OrchestratorsResponse = resp.json().await
+        .map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
+
+    let mut versions: Vec<Version> = json.properties.orchestrators.into_iter()
+        .filter(|o| o.type_ == "Kubernetes" && (show_preview || !o.is_preview))
+        .map(|o| Version::parse(&o.version))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AksError::Parse(format!("SemVer fail: {e}")))?;
+
+    versions.sort_unstable();
+
+    let final_strings: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
+    Ok(final_strings.into())
 }
-
-// Re-export nested modules
-pub mod retry;
-pub mod token;

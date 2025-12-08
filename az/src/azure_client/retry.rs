@@ -1,35 +1,31 @@
-use super::fetch_aks_versions;
-use super::token::get_token_from_cache;
+use super::fetch_and_parse;
+use crate::azure_client::token::{get_token_from_cache, TokenCache};
 use crate::errors::AksError;
-use crate::state::TokenCache;
 use rand::Rng;
-use reqwest::Response;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_retry::{strategy::ExponentialBackoff, Retry};
 use tracing::warn;
 
-// Retry configuration
 const RETRY_BASE_DELAY_MS: u64 = 50;
 const RETRY_JITTER_MS: u64 = 30;
 const MAX_RETRY_ATTEMPTS: usize = 5;
 
-#[inline]
 fn is_retryable_error(err: &AksError) -> bool {
     match err {
-        // Retry for transient HTTP errors (5xx) and throttling (429)
         AksError::AzureHttp { status, .. } => *status == 429 || (*status >= 500 && *status <= 599),
-        // Retry for client-side/network issues (check for timeout message)
         AksError::AzureClient { message } => message.contains("timeout"),
         _ => false,
     }
 }
 
-pub async fn fetch_with_retry(
+pub async fn fetch_versions_with_retry(
     client: &reqwest::Client,
     subscription_id: &str,
     location: &str,
     token_cache: &TokenCache,
-) -> Result<Response, AksError> {
+    show_preview: bool,
+) -> Result<Arc<[String]>, AksError> {
     let mut rng = rand::rng();
     let strategy = ExponentialBackoff::from_millis(RETRY_BASE_DELAY_MS)
         .take(MAX_RETRY_ATTEMPTS)
@@ -40,9 +36,9 @@ pub async fn fetch_with_retry(
             message: "Token expired during retry cycle.".to_string(),
         })?;
 
-        match fetch_aks_versions(client, subscription_id, location, &*token).await {
+        match fetch_and_parse(client, subscription_id, location, &token, show_preview).await {
             Err(e) if is_retryable_error(&e) => {
-                warn!(error = %e, "Retryable error occurred");
+                warn!("Retryable error: {}", e);
                 Err(e)
             }
             other => other,
