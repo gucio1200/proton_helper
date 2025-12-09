@@ -17,12 +17,10 @@ const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 struct OrchestratorsResponse {
     properties: Properties,
 }
-
 #[derive(Deserialize)]
 struct Properties {
     orchestrators: Vec<OrchestratorItem>,
 }
-
 #[derive(Deserialize)]
 struct OrchestratorItem {
     #[serde(rename = "orchestratorType")]
@@ -65,13 +63,11 @@ pub async fn fetch_and_parse(
     let status = resp.status();
     let request_url = resp.url().to_string();
 
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| AksError::AzureClient {
-            message: format!("Failed to read response body: {e}"),
-        })?;
+    let body_text = resp.text().await.map_err(|e| AksError::AzureClient {
+        message: format!("Failed to read response body: {e}"),
+    })?;
 
+    // 4. DEBUG LOGGING
     // Run with `RUST_LOG=debug cargo run` to see the full JSON response in your terminal.
     debug!(
         status = status.as_u16(),
@@ -82,16 +78,36 @@ pub async fn fetch_and_parse(
 
     // 5. Handle HTTP Errors
     if !status.is_success() {
-        // 5a. Check for Invalid Location (400/404)
-        if status.as_u16() == 400 || status.as_u16() == 404 {
-            if body_text.contains("Location") || body_text.contains("location") {
-                return Err(AksError::InvalidLocation(location.to_string()));
+        // Try to parse the Azure JSON error format
+        let maybe_json = serde_json::from_str::<AzureErrorBody>(&body_text);
+
+        if let Ok(az_err) = maybe_json {
+            let code = &az_err.error.code;
+            let message = &az_err.error.message;
+
+            // HANDLE THIS SPECIFIC CASE:
+            // "NoRegisteredProviderFound" -> The location is invalid or not supported for AKS.
+            if code == "NoRegisteredProviderFound" || code == "InvalidLocation" {
+                return Err(AksError::InvalidLocation {
+                    location: location.to_string(),
+                    details: message.clone(), // Pass the full helpful message to the user
+                });
             }
+        }
+
+        // Fallback: Raw text check
+        if (status.as_u16() == 400 || status.as_u16() == 404)
+            && body_text.contains("No registered resource provider")
+        {
+            return Err(AksError::InvalidLocation {
+                location: location.to_string(),
+                details: "Location not found or not supported for AKS (Raw check)".to_string(),
+            });
         }
 
         // 5b. Generic Error Handling
         let msg = serde_json::from_str::<AzureErrorBody>(&body_text)
-            .map(|e| e.error.to_string())
+            .map(|e| e.error.message)
             .unwrap_or_else(|_| body_text.clone());
 
         return Err(AksError::AzureHttp {
@@ -103,8 +119,8 @@ pub async fn fetch_and_parse(
 
     // 6. Parse JSON Response
     // We parse from the `body_text` string we downloaded in step 3.
-    let json: OrchestratorsResponse = serde_json::from_str(&body_text)
-        .map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
+    let json: OrchestratorsResponse =
+        serde_json::from_str(&body_text).map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
     // 7. Filter, Transform, and Sort
     let mut versions: Vec<Version> = json

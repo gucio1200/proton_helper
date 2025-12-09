@@ -50,8 +50,11 @@ pub async fn aks_versions(
     let re = LOCATION_REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
 
     if !re.is_match(location) {
-        // Return 400 Bad Request IMMEDIATELY.
-        return Err(AksError::InvalidLocation(location.to_string()));
+        // Return 400 Bad Request IMMEDIATELY with a local message.
+        return Err(AksError::InvalidLocation {
+            location: location.to_string(),
+            details: "Location contains invalid characters (alphanumeric only).".to_string(),
+        });
     }
 
     tracing::Span::current().record("request_id", req_id.deref().as_str());
@@ -82,7 +85,6 @@ pub async fn aks_versions(
 
 #[get("/status")]
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
-    // Delegates all math/logic to the State to keep the handler clean
     let report = state.get_health();
 
     let mut status_code = if report.status == "healthy" {

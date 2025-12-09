@@ -51,7 +51,8 @@ pub struct Checks {
 
 impl AppState {
     pub fn new(config: Config) -> Result<Self, AksError> {
-        // Enforce hard timeout of 10s to prevent hanging requests
+        // Enforce hard timeout of 10s to prevent hanging requests.
+        // This is CRITICAL. Without this, requests to bad locations might hang forever.
         let http_client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
@@ -59,12 +60,11 @@ impl AppState {
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
-        let credential_struct = WorkloadIdentityCredential::new(Some(
-            WorkloadIdentityCredentialOptions::default(),
-        ))
-        .map_err(|e| AksError::AzureClient {
-            message: e.to_string(),
-        })?;
+        let credential_arc =
+            WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions::default()))
+                .map_err(|e| AksError::AzureClient {
+                    message: e.to_string(),
+                })?;
 
         Ok(Self {
             show_preview: config.show_preview,
@@ -72,7 +72,7 @@ impl AppState {
                 .time_to_live(Duration::from_secs(config.cache_ttl_seconds))
                 .build(),
             token_cache: ArcSwap::new(Arc::new(None)),
-            credential: credential_struct,
+            credential: credential_arc,
             http_client,
             subscription_id: config.subscription_id,
             start_time: OffsetDateTime::now_utc(),
@@ -81,7 +81,10 @@ impl AppState {
     }
 
     pub fn cache_key(&self, location: &str) -> String {
-        format!("{}:{}:{}", self.subscription_id, location, self.show_preview)
+        format!(
+            "{}:{}:{}",
+            self.subscription_id, location, self.show_preview
+        )
     }
 
     pub fn get_health(&self) -> HealthReport {
@@ -95,7 +98,6 @@ impl AppState {
         let is_healthy = token_valid && worker_alive;
 
         // Calculate when the next refresh is strictly scheduled to happen
-        // We subtract the trigger offset from the expiration time.
         let refresh_at = token_status
             .expires_at_utc
             .map(|t| t - REFRESH_TRIGGER_OFFSET);

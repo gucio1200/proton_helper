@@ -10,6 +10,7 @@ use tracing::{error, info, instrument, warn};
 
 // Restart Delay:
 // If the worker thread crashes (panics), the supervisor waits this long before respawning it.
+// Increased to 5s to prevent CPU thrashing if the worker enters a tight crash loop.
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 
 /// The Worker Task:
@@ -44,10 +45,8 @@ async fn run_worker(state: Arc<AppState>) {
 
         if should_refresh {
             info!("Token nearing expiration (or missing). Refreshing...");
-            
-            if let Err(e) =
-                refresh_and_cache_token(&*state.credential, &state.token_cache).await
-            {
+
+            if let Err(e) = refresh_and_cache_token(&*state.credential, &state.token_cache).await {
                 error!("Refresh failed: {e}. Will retry in next interval (55s).");
             }
         }
@@ -63,7 +62,7 @@ pub fn start(state: web::Data<AppState>) {
         info!("Supervisor started.");
         loop {
             let handle = tokio::spawn(run_worker(state.clone()));
-            
+
             match handle.await {
                 Ok(_) => warn!("Worker exited cleanly (Unexpected). Restarting..."),
                 Err(e) => {
@@ -71,7 +70,7 @@ pub fn start(state: web::Data<AppState>) {
                     error!("Worker crashed ({msg}): {e}. Restarting in 5s...");
                 }
             }
-            
+
             // Backoff strategy to prevent infinite fast-loops
             tokio::time::sleep(RESTART_DELAY).await;
         }

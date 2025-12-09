@@ -5,7 +5,13 @@ use tracing::error;
 
 #[derive(Debug, Deserialize)]
 pub struct AzureErrorBody {
-    pub error: serde_json::Value,
+    pub error: AzureInnerError,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AzureInnerError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -29,8 +35,10 @@ pub enum AksError {
     #[error("Location parameter cannot be empty")]
     Validation,
 
-    #[error("Invalid Azure location: '{0}'. Please check the region name.")]
-    InvalidLocation(String),
+    // Holds the full Azure message 'details' so we can pass it to the user.
+    // This allows the user to see the list of valid locations provided by Azure.
+    #[error("Invalid Azure location: '{location}'. Details: {details}")]
+    InvalidLocation { location: String, details: String },
 
     #[error("HTTP client initialization failed: {0}")]
     ClientBuild(String),
@@ -41,7 +49,7 @@ impl ResponseError for AksError {
         let status = match self {
             // Return 400 Bad Request for validation or bad location
             // These are client errors, so the client should NOT retry them.
-            AksError::Validation | AksError::InvalidLocation(_) => {
+            AksError::Validation | AksError::InvalidLocation { .. } => {
                 actix_web::http::StatusCode::BAD_REQUEST
             }
             AksError::AzureHttp { status, .. } => actix_web::http::StatusCode::from_u16(*status)
@@ -57,8 +65,22 @@ impl ResponseError for AksError {
             error!(error = %self, "Request failed");
         }
 
-        HttpResponse::build(status).json(serde_json::json!({
-            "error": self.to_string()
-        }))
+        // Pass specific details back to the client JSON so they know exactly why it failed.
+        let response_body = match self {
+            AksError::InvalidLocation { location, details } => serde_json::json!({
+                "error": "Invalid Location",
+                "location": location,
+                "azure_message": details
+            }),
+            AksError::AzureHttp { message, .. } => serde_json::json!({
+                "error": "Azure API Error",
+                "message": message
+            }),
+            _ => serde_json::json!({
+                "error": self.to_string()
+            }),
+        };
+
+        HttpResponse::build(status).json(response_body)
     }
 }
