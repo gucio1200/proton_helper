@@ -52,6 +52,7 @@ impl AppState {
         let http_client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
+            .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 

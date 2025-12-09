@@ -3,9 +3,13 @@ use crate::errors::AksError;
 use crate::state::AppState;
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
+use std::sync::OnceLock;
 use tracing::instrument;
+
+static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Deserialize, Debug)]
 pub struct LocationQuery {
@@ -28,6 +32,17 @@ pub async fn aks_versions(
     if location.is_empty() {
         return Err(AksError::Validation);
     }
+
+    // 2. "Fail Fast" Regex Check
+    // This catches "east us" (space), "east-us!" (special chars), etc.
+    // Azure locations are generally alphanumeric.
+    let re = LOCATION_REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
+
+    if !re.is_match(location) {
+        // Return error IMMEDIATELY. Do not call Azure. Do not wait.
+        return Err(AksError::InvalidLocation(location.to_string()));
+    }
+
     tracing::Span::current().record("request_id", req_id.deref().as_str());
 
     let versions = state
