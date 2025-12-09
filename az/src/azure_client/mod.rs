@@ -55,11 +55,13 @@ pub async fn fetch_and_parse(
     let status = resp.status();
 
     if !status.is_success() {
+        // Save the URL for the error log
         let request_url = resp.url().to_string();
-
         let body = resp.text().await.unwrap_or_default();
 
         // 1. Check for Invalid Location (400/404)
+        // Azure returns these codes when the location in the URL path is unknown.
+        // We detect this specifically to stop retries and give a better error message.
         if status.as_u16() == 400 || status.as_u16() == 404 {
             if body.contains("Location") || body.contains("location") {
                 return Err(AksError::InvalidLocation(location.to_string()));
@@ -83,6 +85,9 @@ pub async fn fetch_and_parse(
         .await
         .map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
+    // Filter Logic:
+    // - Must be Kubernetes (not standard Docker Swarm etc)
+    // - Must respect the 'show_preview' flag
     let mut versions: Vec<Version> = json
         .properties
         .orchestrators

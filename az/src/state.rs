@@ -8,15 +8,24 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use time::OffsetDateTime;
+use time::{Duration as TimeDuration, OffsetDateTime};
 
 // --- CRITICAL SAFETY CONSTANTS ---
-//
-// 1. Worker Liveness (140s):
+
+// 1. Worker Interval (55s):
+//    How often the background worker wakes up to check the token.
+pub const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55);
+
+// 2. Worker Liveness (140s):
 //    Used by the /status endpoint.
 //    If the background worker hasn't updated the heartbeat in ~2.5 intervals (2.5 * 55s),
 //    we assume the thread has crashed/stalled and mark the service unhealthy.
 pub const WORKER_LIVENESS_THRESHOLD: i64 = 140;
+
+// 3. Refresh Trigger (130s):
+//    We refresh if the token has less than 130s remaining.
+//    Proof: 130s > 65s (Handler Leeway) + 55s (Worker Interval).
+pub const REFRESH_TRIGGER_OFFSET: TimeDuration = TimeDuration::seconds(130);
 
 pub struct AppState {
     pub show_preview: bool,
@@ -39,6 +48,7 @@ pub struct HealthReport {
     pub uptime_seconds: i64,
     pub heartbeat_age: i64,
     pub token_expires_at: Option<String>,
+    pub next_token_refresh_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,13 +59,15 @@ pub struct Checks {
 
 impl AppState {
     pub fn new(config: Config) -> Result<Self, AksError> {
+        // Enforce hard timeout of 10s to prevent hanging requests if Azure stalls.
         let http_client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
+        // Using WorkloadIdentityCredential for Kubernetes-native auth
         let credential_struct =
             WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions::default()))
                 .map_err(|e| AksError::AzureClient {
@@ -89,10 +101,14 @@ impl AppState {
         let heartbeat_age = now.unix_timestamp() - last_beat;
 
         let token_status = get_token_status(&self.token_cache);
-
         let token_valid = token_status.is_valid;
         let worker_alive = heartbeat_age < WORKER_LIVENESS_THRESHOLD;
         let is_healthy = token_valid && worker_alive;
+
+        // Calculate when the next refresh is strictly scheduled to happen
+        let refresh_at = token_status
+            .expires_at_utc
+            .map(|t| t - REFRESH_TRIGGER_OFFSET);
 
         HealthReport {
             status: if is_healthy { "healthy" } else { "unhealthy" },
@@ -103,6 +119,7 @@ impl AppState {
             uptime_seconds: (now - self.start_time).whole_seconds(),
             heartbeat_age,
             token_expires_at: token_status.expires_at_utc.map(|t| t.to_string()),
+            next_token_refresh_at: refresh_at.map(|t| t.to_string()),
         }
     }
 }

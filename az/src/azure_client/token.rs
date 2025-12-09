@@ -30,6 +30,8 @@ impl InternalCachedToken {
     }
 }
 
+// Thread-safe, lock-free swap storage for the token.
+// Allows HTTP handlers to read the token without blocking the Writer (Background Worker).
 pub type TokenCache = ArcSwap<Option<InternalCachedToken>>;
 
 // --- Logic ---
@@ -57,6 +59,9 @@ pub async fn refresh_and_cache_token(
 pub fn get_token_from_cache(cache: &TokenCache) -> Option<Arc<str>> {
     let cached_arc = cache.load();
     if let Some(cached) = cached_arc.as_ref() {
+        // Enforce the strict Leeway check here.
+        // If the token is valid but has < 65s left, we treat it as expired
+        // to prevent API failures mid-request.
         if cached.expires_at > OffsetDateTime::now_utc() + TOKEN_REFRESH_LEEWAY {
             return Some(Arc::clone(&cached.token));
         }

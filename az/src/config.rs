@@ -6,6 +6,7 @@ const DEFAULT_PREVIEW: &str = "false";
 #[derive(Parser, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Config {
+    // The Azure Subscription ID is mandatory and usually passed via ENV in K8s
     #[arg(env = "AZ_SUBSCRIPTION_ID")]
     pub subscription_id: String,
 
@@ -15,6 +16,8 @@ pub struct Config {
     #[arg(long, env = "HTTP_PORT", default_value_t = 8080)]
     pub port: u16,
 
+    // Controls how long the 'moka' cache holds the list of versions.
+    // Default is 1 hour (3600s).
     #[arg(long, env = "CACHE_TTL_SECONDS", default_value_t = 3600)]
     pub cache_ttl_seconds: u64,
 }

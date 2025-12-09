@@ -9,6 +9,11 @@ use std::ops::Deref;
 use std::sync::OnceLock;
 use tracing::instrument;
 
+// --- STATIC RESOURCES ---
+
+// Global Regex for validating locations.
+// We use OnceLock to compile this exactly once on the first request,
+// saving CPU on all subsequent requests.
 static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 #[derive(Deserialize, Debug)]
@@ -21,6 +26,8 @@ pub struct VersionsResponse {
     pub versions: Vec<String>,
 }
 
+// --- HTTP HANDLERS ---
+
 #[get("/versions")]
 #[instrument(skip(state, req_id), fields(location = %query.location))]
 pub async fn aks_versions(
@@ -29,22 +36,30 @@ pub async fn aks_versions(
     req_id: web::ReqData<RequestId>,
 ) -> Result<impl Responder, AksError> {
     let location = query.location.trim();
+
+    // 1. Basic Validation
     if location.is_empty() {
         return Err(AksError::Validation);
     }
 
     // 2. "Fail Fast" Regex Check
-    // This catches "east us" (space), "east-us!" (special chars), etc.
-    // Azure locations are generally alphanumeric.
+    // PERFORMANCE OPTIMIZATION:
+    // We check the input format locally before making any network calls.
+    // This catches typos like "east us" (space) or "east-us!" (special chars) instantly.
+    // It prevents "hanging" connections where Azure might ignore the request or timeout.
     let re = LOCATION_REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
 
     if !re.is_match(location) {
-        // Return error IMMEDIATELY. Do not call Azure. Do not wait.
+        // Return 400 Bad Request IMMEDIATELY.
         return Err(AksError::InvalidLocation(location.to_string()));
     }
 
     tracing::Span::current().record("request_id", req_id.deref().as_str());
 
+    // 3. Cache-Aside Pattern
+    // - Check Moka cache for this location.
+    // - If miss: Execute the async block (fetch with retry).
+    // - If hit: Return cached data instantly.
     let versions = state
         .cache
         .try_get_with(state.cache_key(location), async {
@@ -67,6 +82,7 @@ pub async fn aks_versions(
 
 #[get("/status")]
 pub async fn status(state: web::Data<AppState>) -> impl Responder {
+    // Delegates all math/logic to the State to keep the handler clean
     let report = state.get_health();
 
     let mut status_code = if report.status == "healthy" {

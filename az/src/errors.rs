@@ -10,6 +10,7 @@ pub struct AzureErrorBody {
 
 #[derive(Debug, Error, Clone)]
 pub enum AksError {
+    // 5xx or 429 Errors (Retryable)
     #[error("Azure API request failed ({status}): {message} at {url}")]
     AzureHttp {
         status: u16,
@@ -17,12 +18,14 @@ pub enum AksError {
         url: String,
     },
 
+    // Connectivity Errors (Timeout, DNS)
     #[error("Azure client error: {message}")]
     AzureClient { message: String },
 
     #[error("Failed to parse response: {0}")]
     Parse(String),
 
+    // 400 Errors (User Fault - Do Not Retry)
     #[error("Location parameter cannot be empty")]
     Validation,
 
@@ -37,6 +40,7 @@ impl ResponseError for AksError {
     fn error_response(&self) -> HttpResponse {
         let status = match self {
             // Return 400 Bad Request for validation or bad location
+            // These are client errors, so the client should NOT retry them.
             AksError::Validation | AksError::InvalidLocation(_) => {
                 actix_web::http::StatusCode::BAD_REQUEST
             }
@@ -46,7 +50,9 @@ impl ResponseError for AksError {
             _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        // Don't log "Request failed" error for user input mistakes (400), keeps logs clean
+        // LOGGING STRATEGY:
+        // - 5xx/Connectivity errors: Log as Error (needs attention).
+        // - 4xx errors: Do NOT log as Error (avoids log spam from bad user input).
         if !status.is_client_error() {
             error!(error = %self, "Request failed");
         }
