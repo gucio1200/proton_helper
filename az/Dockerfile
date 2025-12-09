@@ -16,8 +16,8 @@ FROM alpine
 
 WORKDIR /app
 
-COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/az /app/az
+COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/aksver /app/aksver
 
 USER 1000
 
-ENTRYPOINT ["/app/az"]
+ENTRYPOINT ["/app/aksver"]
