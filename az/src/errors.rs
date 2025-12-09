@@ -35,7 +35,7 @@ pub enum AksError {
     #[error("Location parameter cannot be empty")]
     Validation,
 
-    // Holds the full Azure message 'details' so we can pass it to the user.
+    // Holds the full Azure message 'details' so we can pass it.
     // This allows the user to see the list of valid locations provided by Azure.
     #[error("Invalid Azure location: '{location}'. Details: {details}")]
     InvalidLocation { location: String, details: String },

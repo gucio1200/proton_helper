@@ -68,7 +68,6 @@ pub async fn fetch_and_parse(
     })?;
 
     // 4. DEBUG LOGGING
-    // Run with `RUST_LOG=debug cargo run` to see the full JSON response in your terminal.
     debug!(
         status = status.as_u16(),
         url = %request_url,
@@ -85,7 +84,6 @@ pub async fn fetch_and_parse(
             let code = &az_err.error.code;
             let message = &az_err.error.message;
 
-            // HANDLE THIS SPECIFIC CASE:
             // "NoRegisteredProviderFound" -> The location is invalid or not supported for AKS.
             if code == "NoRegisteredProviderFound" || code == "InvalidLocation" {
                 return Err(AksError::InvalidLocation {

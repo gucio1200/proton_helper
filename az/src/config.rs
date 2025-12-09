@@ -6,7 +6,7 @@ const DEFAULT_PREVIEW: &str = "false";
 #[derive(Parser, Clone)]
 #[clap(author, version, about, long_about = None)]
 pub struct Config {
-    // The Azure Subscription ID is mandatory and usually passed via ENV in K8s
+    // The Azure Subscription ID is mandatory and passed via ENV in K8s
     #[arg(env = "AZ_SUBSCRIPTION_ID")]
     pub subscription_id: String,
 
