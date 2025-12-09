@@ -3,6 +3,7 @@ use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
 use std::sync::Arc;
+use tracing::debug;
 
 pub mod retry;
 pub mod token;
@@ -11,14 +12,17 @@ pub const AKS_API_VERSION: &str = "2020-11-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 
 // --- Internal structs ---
+// These structs strictly mirror the Azure Resource Manager (ARM) JSON response.
 #[derive(Deserialize)]
 struct OrchestratorsResponse {
     properties: Properties,
 }
+
 #[derive(Deserialize)]
 struct Properties {
     orchestrators: Vec<OrchestratorItem>,
 }
+
 #[derive(Deserialize)]
 struct OrchestratorItem {
     #[serde(rename = "orchestratorType")]
@@ -31,6 +35,8 @@ struct OrchestratorItem {
 
 // --- Logic ---
 
+/// Fetches the list of available Kubernetes versions from Azure, parses the JSON,
+/// filters by preview status, and sorts them semantically.
 pub async fn fetch_and_parse(
     client: &Client,
     subscription_id: &str,
@@ -38,11 +44,13 @@ pub async fn fetch_and_parse(
     token: &str,
     show_preview: bool,
 ) -> Result<Arc<[String]>, AksError> {
+    // 1. Construct the ARM Endpoint URL
     let url_str = format!(
         "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
         AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
     );
 
+    // 2. Execute HTTP Request
     let resp = client
         .get(&url_str)
         .bearer_auth(token)
@@ -52,26 +60,39 @@ pub async fn fetch_and_parse(
             message: e.to_string(),
         })?;
 
+    // 3. Capture Metadata & Body
+    // We must read the body into a String immediately so we can both LOG it and PARSE it.
     let status = resp.status();
+    let request_url = resp.url().to_string();
 
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| AksError::AzureClient {
+            message: format!("Failed to read response body: {e}"),
+        })?;
+
+    // Run with `RUST_LOG=debug cargo run` to see the full JSON response in your terminal.
+    debug!(
+        status = status.as_u16(),
+        url = %request_url,
+        body = %body_text,
+        "Azure API Response Received"
+    );
+
+    // 5. Handle HTTP Errors
     if !status.is_success() {
-        // Save the URL for the error log
-        let request_url = resp.url().to_string();
-        let body = resp.text().await.unwrap_or_default();
-
-        // 1. Check for Invalid Location (400/404)
-        // Azure returns these codes when the location in the URL path is unknown.
-        // We detect this specifically to stop retries and give a better error message.
+        // 5a. Check for Invalid Location (400/404)
         if status.as_u16() == 400 || status.as_u16() == 404 {
-            if body.contains("Location") || body.contains("location") {
+            if body_text.contains("Location") || body_text.contains("location") {
                 return Err(AksError::InvalidLocation(location.to_string()));
             }
         }
 
-        // 2. Generic Error Handling
-        let msg = serde_json::from_str::<AzureErrorBody>(&body)
+        // 5b. Generic Error Handling
+        let msg = serde_json::from_str::<AzureErrorBody>(&body_text)
             .map(|e| e.error.to_string())
-            .unwrap_or(body);
+            .unwrap_or_else(|_| body_text.clone());
 
         return Err(AksError::AzureHttp {
             status: status.as_u16(),
@@ -80,14 +101,12 @@ pub async fn fetch_and_parse(
         });
     }
 
-    let json: OrchestratorsResponse = resp
-        .json()
-        .await
+    // 6. Parse JSON Response
+    // We parse from the `body_text` string we downloaded in step 3.
+    let json: OrchestratorsResponse = serde_json::from_str(&body_text)
         .map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
-    // Filter Logic:
-    // - Must be Kubernetes (not standard Docker Swarm etc)
-    // - Must respect the 'show_preview' flag
+    // 7. Filter, Transform, and Sort
     let mut versions: Vec<Version> = json
         .properties
         .orchestrators
