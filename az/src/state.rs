@@ -1,4 +1,4 @@
-use crate::azure_client::token::{get_token_status, TokenCache};
+use crate::azure_client::token::{get_token_status, TokenCache, REFRESH_TRIGGER_OFFSET};
 use crate::config::Config;
 use crate::errors::AksError;
 use arc_swap::ArcSwap;
@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use time::{Duration as TimeDuration, OffsetDateTime};
+use time::OffsetDateTime;
 
 // --- CRITICAL SAFETY CONSTANTS ---
 
@@ -22,11 +22,6 @@ pub const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(55);
 //    we assume the thread has crashed/stalled and mark the service unhealthy.
 pub const WORKER_LIVENESS_THRESHOLD: i64 = 140;
 
-// 3. Refresh Trigger (130s):
-//    We refresh if the token has less than 130s remaining.
-//    Proof: 130s > 65s (Handler Leeway) + 55s (Worker Interval).
-pub const REFRESH_TRIGGER_OFFSET: TimeDuration = TimeDuration::seconds(130);
-
 pub struct AppState {
     pub show_preview: bool,
     pub cache: Cache<String, Arc<[String]>>,
@@ -35,9 +30,6 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub subscription_id: String,
     pub start_time: OffsetDateTime,
-
-    // Tracks the last time the background worker successfully looped.
-    // Checked by the /status endpoint to ensure the refresh logic is actually running.
     pub worker_last_heartbeat: AtomicI64,
 }
 
@@ -59,7 +51,7 @@ pub struct Checks {
 
 impl AppState {
     pub fn new(config: Config) -> Result<Self, AksError> {
-        // Enforce hard timeout of 10s to prevent hanging requests if Azure stalls.
+        // Enforce hard timeout of 10s to prevent hanging requests
         let http_client = reqwest::Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
@@ -67,12 +59,12 @@ impl AppState {
             .build()
             .map_err(|e| AksError::ClientBuild(e.to_string()))?;
 
-        // Using WorkloadIdentityCredential for Kubernetes-native auth
-        let credential_struct =
-            WorkloadIdentityCredential::new(Some(WorkloadIdentityCredentialOptions::default()))
-                .map_err(|e| AksError::AzureClient {
-                    message: e.to_string(),
-                })?;
+        let credential_struct = WorkloadIdentityCredential::new(Some(
+            WorkloadIdentityCredentialOptions::default(),
+        ))
+        .map_err(|e| AksError::AzureClient {
+            message: e.to_string(),
+        })?;
 
         Ok(Self {
             show_preview: config.show_preview,
@@ -89,10 +81,7 @@ impl AppState {
     }
 
     pub fn cache_key(&self, location: &str) -> String {
-        format!(
-            "{}:{}:{}",
-            self.subscription_id, location, self.show_preview
-        )
+        format!("{}:{}:{}", self.subscription_id, location, self.show_preview)
     }
 
     pub fn get_health(&self) -> HealthReport {
@@ -106,6 +95,7 @@ impl AppState {
         let is_healthy = token_valid && worker_alive;
 
         // Calculate when the next refresh is strictly scheduled to happen
+        // We subtract the trigger offset from the expiration time.
         let refresh_at = token_status
             .expires_at_utc
             .map(|t| t - REFRESH_TRIGGER_OFFSET);

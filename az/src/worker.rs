@@ -1,5 +1,5 @@
 use crate::azure_client::token::refresh_and_cache_token;
-use crate::state::{AppState, REFRESH_TRIGGER_OFFSET, TOKEN_REFRESH_INTERVAL};
+use crate::state::{AppState, TOKEN_REFRESH_INTERVAL};
 use actix_web::web;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -8,11 +8,8 @@ use time::OffsetDateTime;
 use tokio::time::interval;
 use tracing::{error, info, instrument, warn};
 
-// --- CONFIGURATION ---
-
 // Restart Delay:
 // If the worker thread crashes (panics), the supervisor waits this long before respawning it.
-// Increased to 5s to prevent CPU thrashing if the worker enters a tight crash loop.
 const RESTART_DELAY: Duration = Duration::from_secs(5);
 
 /// The Worker Task:
@@ -28,33 +25,29 @@ async fn run_worker(state: Arc<AppState>) {
 
         // 1. Heartbeat Pattern
         // Update the atomic timestamp to prove to the /status endpoint that this thread is alive.
-        // If this isn't updated for ~140s, the service marks itself "Unhealthy".
         state.worker_last_heartbeat.store(
             OffsetDateTime::now_utc().unix_timestamp(),
             Ordering::Relaxed,
         );
 
         // 2. Check Token Expiration
-        // We check if the current token has less life remaining than our safety threshold (130s).
-        //
-        // LOGIC EXPLANATION:
-        // - REFRESH_TRIGGER_OFFSET is 130s.
-        // - TOKEN_REFRESH_LEEWAY (in handlers) is 65s.
-        // - The gap (130s - 65s = 65s) is larger than our sleep interval (55s).
-        // This guarantees we will always attempt a refresh at least once before the token becomes invalid for HTTP requests.
-        let guard = state.token_cache.load();
-        let should_refresh = match guard.as_ref() {
-            Some(token) => token.expires_at < OffsetDateTime::now_utc() + REFRESH_TRIGGER_OFFSET,
-            None => true, // Initial state or cache cleared: No token exists, fetch immediately.
+        // We use a block scope so the 'guard' is automatically dropped at the closing brace '}'.
+        // This prevents deadlock bugs without needing manual 'drop(guard)'.
+        let should_refresh = {
+            let guard = state.token_cache.load();
+            match guard.as_ref() {
+                // The math logic is hidden inside the token struct (Encapsulation)
+                Some(token) => token.needs_background_refresh(),
+                None => true, // Initial state: No token exists, fetch immediately.
+            }
         };
 
         if should_refresh {
             info!("Token nearing expiration (or missing). Refreshing...");
-
-            // Drop the guard before awaiting the network call to avoid holding the lock
-            drop(guard);
-
-            if let Err(e) = refresh_and_cache_token(&*state.credential, &state.token_cache).await {
+            
+            if let Err(e) =
+                refresh_and_cache_token(&*state.credential, &state.token_cache).await
+            {
                 error!("Refresh failed: {e}. Will retry in next interval (55s).");
             }
         }
@@ -69,21 +62,16 @@ pub fn start(state: web::Data<AppState>) {
     tokio::spawn(async move {
         info!("Supervisor started.");
         loop {
-            // Spawn the worker and capture its JoinHandle
             let handle = tokio::spawn(run_worker(state.clone()));
-
-            // Await the handle to detect when the worker stops
+            
             match handle.await {
                 Ok(_) => warn!("Worker exited cleanly (Unexpected). Restarting..."),
                 Err(e) => {
-                    if e.is_panic() {
-                        error!("CRITICAL: Worker Panicked! Restarting in 5s...");
-                    } else {
-                        error!("Worker failed: {e}. Restarting in 5s...");
-                    }
+                    let msg = if e.is_panic() { "Panic" } else { "Error" };
+                    error!("Worker crashed ({msg}): {e}. Restarting in 5s...");
                 }
             }
-
+            
             // Backoff strategy to prevent infinite fast-loops
             tokio::time::sleep(RESTART_DELAY).await;
         }

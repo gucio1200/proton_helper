@@ -212,6 +212,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aksver"
+version = "0.1.0"
+dependencies = [
+ "actix-request-identifier",
+ "actix-web",
+ "anyhow",
+ "arc-swap",
+ "azure_core",
+ "azure_identity",
+ "clap",
+ "moka",
+ "openssl",
+ "rand 0.9.2",
+ "regex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-retry",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -328,33 +355,6 @@ name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
-
-[[package]]
-name = "az"
-version = "0.1.0"
-dependencies = [
- "actix-request-identifier",
- "actix-web",
- "anyhow",
- "arc-swap",
- "azure_core",
- "azure_identity",
- "clap",
- "moka",
- "openssl",
- "rand 0.9.2",
- "regex",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "thiserror",
- "time",
- "tokio",
- "tokio-retry",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "azure_core"
