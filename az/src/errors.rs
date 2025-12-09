@@ -26,6 +26,9 @@ pub enum AksError {
     #[error("Location parameter cannot be empty")]
     Validation,
 
+    #[error("Invalid Azure location: '{0}'. Please check the region name.")]
+    InvalidLocation(String),
+
     #[error("HTTP client initialization failed: {0}")]
     ClientBuild(String),
 }
@@ -33,14 +36,20 @@ pub enum AksError {
 impl ResponseError for AksError {
     fn error_response(&self) -> HttpResponse {
         let status = match self {
-            AksError::Validation => actix_web::http::StatusCode::BAD_REQUEST,
+            // Return 400 Bad Request for validation or bad location
+            AksError::Validation | AksError::InvalidLocation(_) => {
+                actix_web::http::StatusCode::BAD_REQUEST
+            }
             AksError::AzureHttp { status, .. } => actix_web::http::StatusCode::from_u16(*status)
                 .unwrap_or(actix_web::http::StatusCode::SERVICE_UNAVAILABLE),
             AksError::AzureClient { .. } => actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
             _ => actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        error!(error = %self, "Request failed");
+        // Don't log "Request failed" error for user input mistakes (400), keeps logs clean
+        if !status.is_client_error() {
+            error!(error = %self, "Request failed");
+        }
 
         HttpResponse::build(status).json(serde_json::json!({
             "error": self.to_string()

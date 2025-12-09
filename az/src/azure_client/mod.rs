@@ -10,7 +10,7 @@ pub mod token;
 pub const AKS_API_VERSION: &str = "2020-11-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 
-// --- Internal structs (Hidden from handlers) ---
+// --- Internal structs ---
 #[derive(Deserialize)]
 struct OrchestratorsResponse {
     properties: Properties,
@@ -38,13 +38,13 @@ pub async fn fetch_and_parse(
     token: &str,
     show_preview: bool,
 ) -> Result<Arc<[String]>, AksError> {
-    let url = format!(
+    let url_str = format!(
         "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
         AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
     );
 
     let resp = client
-        .get(&url)
+        .get(&url_str)
         .bearer_auth(token)
         .send()
         .await
@@ -52,17 +52,29 @@ pub async fn fetch_and_parse(
             message: e.to_string(),
         })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        let url = resp.url().to_string();
+    let status = resp.status();
+
+    if !status.is_success() {
+        let request_url = resp.url().to_string();
+
         let body = resp.text().await.unwrap_or_default();
+
+        // 1. Check for Invalid Location (400/404)
+        if status.as_u16() == 400 || status.as_u16() == 404 {
+            if body.contains("Location") || body.contains("location") {
+                return Err(AksError::InvalidLocation(location.to_string()));
+            }
+        }
+
+        // 2. Generic Error Handling
         let msg = serde_json::from_str::<AzureErrorBody>(&body)
             .map(|e| e.error.to_string())
             .unwrap_or(body);
+
         return Err(AksError::AzureHttp {
-            status,
+            status: status.as_u16(),
             message: msg,
-            url,
+            url: request_url,
         });
     }
 

@@ -13,8 +13,11 @@ const MAX_RETRY_ATTEMPTS: usize = 5;
 
 fn is_retryable_error(err: &AksError) -> bool {
     match err {
+        // Retry 429 (Throttling) and 5xx (Server Errors)
         AksError::AzureHttp { status, .. } => *status == 429 || (*status >= 500 && *status <= 599),
+        // Retry timeouts
         AksError::AzureClient { message } => message.contains("timeout"),
+        // DO NOT RETRY: InvalidLocation, Validation, Parse errors, or 400/404s
         _ => false,
     }
 }

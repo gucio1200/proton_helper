@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use time::OffsetDateTime;
 
+// --- CRITICAL SAFETY CONSTANTS ---
+//
 // 1. Worker Liveness (140s):
 //    Used by the /status endpoint.
 //    If the background worker hasn't updated the heartbeat in ~2.5 intervals (2.5 * 55s),
