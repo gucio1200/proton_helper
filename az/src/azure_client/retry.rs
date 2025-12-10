@@ -4,7 +4,7 @@ use crate::errors::AksError;
 use rand::Rng;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_retry::{strategy::ExponentialBackoff, Retry};
+use tokio_retry::{strategy::ExponentialBackoff, RetryIf};
 use tracing::warn;
 
 // --- RETRY CONFIGURATION ---
@@ -16,7 +16,6 @@ const MAX_RETRY_ATTEMPTS: usize = 5;
 fn is_retryable_error(err: &AksError) -> bool {
     match err {
         // RETRY: 429 (Throttling) and 5xx (Server Errors)
-        // These are temporary issues on Azure's side.
         AksError::AzureHttp { status, .. } => *status == 429 || (*status >= 500 && *status <= 599),
 
         // RETRY: Client timeouts/Network blips
@@ -25,7 +24,7 @@ fn is_retryable_error(err: &AksError) -> bool {
         // DO NOT RETRY:
         // - InvalidLocation (User Input Error)
         // - Validation (User Input Error)
-        // - Parse errors (Code/API Mismatch)
+        // - Parse errors
         // - 404 Not Found
         _ => false,
     }
@@ -40,24 +39,32 @@ pub async fn fetch_versions_with_retry(
 ) -> Result<Arc<[String]>, AksError> {
     let mut rng = rand::rng();
 
-    // Exponential backoff with jitter to prevent "thundering herd"
+    // Exponential backoff with jitter
     let strategy = ExponentialBackoff::from_millis(RETRY_BASE_DELAY_MS)
         .take(MAX_RETRY_ATTEMPTS)
         .map(|d| d + Duration::from_millis(rng.random_range(0..RETRY_JITTER_MS)));
 
-    Retry::spawn(strategy, || async {
-        // Fetch a fresh token reference for each retry attempt
-        let token = get_token_from_cache(token_cache).ok_or_else(|| AksError::AzureClient {
-            message: "Token expired during retry cycle.".to_string(),
-        })?;
+    RetryIf::spawn(
+        strategy,
+        || async {
+            // 1. Get Token
+            let token = get_token_from_cache(token_cache).ok_or_else(|| AksError::AzureClient {
+                message: "Token expired during retry cycle.".to_string(),
+            })?;
 
-        match fetch_and_parse(client, subscription_id, location, &token, show_preview).await {
-            Err(e) if is_retryable_error(&e) => {
-                warn!("Retryable error: {}", e);
-                Err(e)
+            // 2. Fetch
+            let result = fetch_and_parse(client, subscription_id, location, &token, show_preview).await;
+
+            // 3. Log warning only if we are ABOUT to retry
+            if let Err(e) = &result {
+                if is_retryable_error(e) {
+                    warn!("Retryable error encountered: {}", e);
+                }
             }
-            other => other,
-        }
-    })
+
+            result
+        },
+        is_retryable_error, 
+    )
     .await
 }
