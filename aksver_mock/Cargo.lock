@@ -201,6 +201,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aksver_mock"
+version = "0.1.0"
+dependencies = [
+ "actix-web",
+ "serde",
+]
+
+[[package]]
 name = "alloc-no-stdlib"
 version = "2.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -213,14 +221,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94fb8275041c72129eb51b7d0322c29b8387a0386127718b096429201a5d6ece"
 dependencies = [
  "alloc-no-stdlib",
-]
-
-[[package]]
-name = "az_mock"
-version = "0.1.0"
-dependencies = [
- "actix-web",
- "serde",
 ]
 
 [[package]]
