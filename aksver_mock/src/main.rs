@@ -36,13 +36,13 @@ async fn get_versions(query: web::Query<VersionQuery>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    println!("Server starting at http://127.0.0.1:8080");
+    println!("Server starting at http://0.0.0.0:8080");
 
     HttpServer::new(|| {
         App::new()
             .service(get_versions)
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("0.0.0.0", 8080))?
     .run()
     .await
 }
