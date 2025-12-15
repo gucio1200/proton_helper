@@ -18,6 +18,7 @@ jobs:
           - pnp
           - kodi_ask
           - az
+          - aksver_mock
     steps:
       # Checkout repository
       - name: Checkout code
