@@ -1,4 +1,5 @@
 use crate::azure_client::token::{get_token_status, TokenCache, REFRESH_TRIGGER_OFFSET};
+use crate::azure_client::RenovateResponse;
 use crate::config::Config;
 use crate::errors::AksError;
 use arc_swap::ArcSwap;
@@ -24,7 +25,7 @@ pub const WORKER_LIVENESS_THRESHOLD: i64 = 140;
 
 pub struct AppState {
     pub show_preview: bool,
-    pub cache: Cache<String, Arc<[String]>>,
+    pub cache: Cache<String, Arc<RenovateResponse>>,
     pub token_cache: TokenCache,
     pub credential: Arc<WorkloadIdentityCredential>,
     pub http_client: reqwest::Client,
