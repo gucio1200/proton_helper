@@ -48,8 +48,10 @@ async fn main() -> Result<()> {
             .app_data(app_data.clone())
             .wrap(RequestIdentifier::with_uuid())
             .wrap(Logger::default())
-            .service(aks_versions)
+            // Register specific paths FIRST to avoid wildcard capture.
+            // "status" matches the wildcard {location}, so it MUST be defined before aks_versions.
             .service(status)
+            .service(aks_versions)
     })
     .bind(("0.0.0.0", config.port))?
     .run()

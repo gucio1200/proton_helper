@@ -1,7 +1,7 @@
 use crate::errors::{AksError, AzureErrorBody};
 use reqwest::Client;
 use semver::Version;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -10,6 +10,27 @@ pub mod token;
 
 pub const AKS_API_VERSION: &str = "2020-11-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
+const K8S_GITHUB_URL: &str = "https://github.com/kubernetes/kubernetes";
+
+// --- Output Structs (Renovate Pattern) ---
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RenovateResponse {
+    pub releases: Vec<RenovateRelease>,
+    pub source_url: String,
+    pub changelog_url: String,
+    pub homepage: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct RenovateRelease {
+    pub version: String,
+    pub is_stable: bool,
+    pub changelog_url: String,
+    pub source_url: String,
+}
 
 // --- Internal structs ---
 // These structs strictly mirror the Azure Resource Manager (ARM) JSON response.
@@ -31,6 +52,24 @@ struct OrchestratorItem {
     is_preview: bool,
 }
 
+// --- Helper Functions ---
+
+fn generate_changelog_url(version: &str) -> String {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() < 3 {
+        return "".to_string();
+    }
+    
+    let major = parts[0];
+    let minor = parts[1];
+    let patch = parts[2];
+
+    format!(
+        "{}/blob/master/CHANGELOG/CHANGELOG-{}.{}.md#v{}{}{}",
+        K8S_GITHUB_URL, major, minor, major, minor, patch
+    )
+}
+
 // --- Logic ---
 
 /// Fetches the list of available Kubernetes versions from Azure, parses the JSON,
@@ -41,7 +80,7 @@ pub async fn fetch_and_parse(
     location: &str,
     token: &str,
     show_preview: bool,
-) -> Result<Arc<[String]>, AksError> {
+) -> Result<Arc<RenovateResponse>, AksError> {
     // 1. Construct the ARM Endpoint URL
     let url_str = format!(
         "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
@@ -121,17 +160,42 @@ pub async fn fetch_and_parse(
         serde_json::from_str(&body_text).map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
     // 7. Filter, Transform, and Sort
-    let mut versions: Vec<Version> = json
+    // We collect into a Vec of (Version, is_preview) tuples first to allow sorting
+    let mut version_tuples: Vec<(Version, bool)> = json
         .properties
         .orchestrators
         .into_iter()
         .filter(|o| o.type_ == "Kubernetes" && (show_preview || !o.is_preview))
-        .map(|o| Version::parse(&o.version))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AksError::Parse(format!("SemVer fail: {e}")))?;
+        .map(|o| {
+            Version::parse(&o.version)
+                .map(|v| (v, o.is_preview))
+                .map_err(|e| AksError::Parse(format!("SemVer fail: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    versions.sort_unstable();
+    // Sort by version
+    version_tuples.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
-    let final_strings: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
-    Ok(final_strings.into())
+    // 8. Map to Renovate format
+    let releases: Vec<RenovateRelease> = version_tuples
+        .into_iter()
+        .map(|(v, is_preview)| {
+            let version_string = v.to_string();
+            RenovateRelease {
+                version: version_string.clone(),
+                is_stable: !is_preview,
+                changelog_url: generate_changelog_url(&version_string),
+                source_url: K8S_GITHUB_URL.to_string(),
+            }
+        })
+        .collect();
+
+    let response = RenovateResponse {
+        releases,
+        source_url: K8S_GITHUB_URL.to_string(),
+        changelog_url: format!("{}/blob/master/CHANGELOG/README.md", K8S_GITHUB_URL),
+        homepage: "https://kubernetes.io".to_string(),
+    };
+
+    Ok(Arc::new(response))
 }

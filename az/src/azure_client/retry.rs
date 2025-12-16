@@ -1,5 +1,6 @@
 use super::fetch_and_parse;
 use crate::azure_client::token::{get_token_from_cache, TokenCache};
+use crate::azure_client::RenovateResponse;
 use crate::errors::AksError;
 use rand::Rng;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ const MAX_RETRY_ATTEMPTS: usize = 5;
 fn is_retryable_error(err: &AksError) -> bool {
     match err {
         // RETRY: 429 (Throttling) and 5xx (Server Errors)
+        // These are temporary issues on Azure's side.
         AksError::AzureHttp { status, .. } => *status == 429 || (*status >= 500 && *status <= 599),
 
         // RETRY: Client timeouts/Network blips
@@ -36,7 +38,7 @@ pub async fn fetch_versions_with_retry(
     location: &str,
     token_cache: &TokenCache,
     show_preview: bool,
-) -> Result<Arc<[String]>, AksError> {
+) -> Result<Arc<RenovateResponse>, AksError> {
     let mut rng = rand::rng();
 
     // Exponential backoff with jitter
@@ -53,7 +55,8 @@ pub async fn fetch_versions_with_retry(
             })?;
 
             // 2. Fetch
-            let result = fetch_and_parse(client, subscription_id, location, &token, show_preview).await;
+            let result =
+                fetch_and_parse(client, subscription_id, location, &token, show_preview).await;
 
             // 3. Log warning only if we are ABOUT to retry
             if let Err(e) = &result {
@@ -64,7 +67,7 @@ pub async fn fetch_versions_with_retry(
 
             result
         },
-        is_retryable_error, 
+        is_retryable_error,
     )
     .await
 }

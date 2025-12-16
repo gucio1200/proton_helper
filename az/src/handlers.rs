@@ -4,7 +4,6 @@ use crate::state::AppState;
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 use std::sync::OnceLock;
 use tracing::instrument;
@@ -16,26 +15,17 @@ use tracing::instrument;
 // saving CPU on all subsequent requests.
 static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 
-#[derive(Deserialize, Debug)]
-pub struct LocationQuery {
-    pub location: String,
-}
-
-#[derive(Serialize)]
-pub struct VersionsResponse {
-    pub versions: Vec<String>,
-}
-
 // --- HTTP HANDLERS ---
 
-#[get("/versions")]
-#[instrument(skip(state, req_id), fields(location = %query.location))]
+#[get("/{location}")]
+#[instrument(skip(state, req_id), fields(location = %path))]
 pub async fn aks_versions(
-    query: web::Query<LocationQuery>,
+    path: web::Path<String>,
     state: web::Data<AppState>,
     req_id: web::ReqData<RequestId>,
 ) -> Result<impl Responder, AksError> {
-    let location = query.location.trim();
+    let location = path.into_inner();
+    let location = location.trim();
 
     // 1. Basic Validation
     if location.is_empty() {
@@ -63,7 +53,7 @@ pub async fn aks_versions(
     // - Check Moka cache for this location.
     // - If miss: Execute the async block (fetch with retry).
     // - If hit: Return cached data instantly.
-    let versions = state
+    let response_data = state
         .cache
         .try_get_with(state.cache_key(location), async {
             fetch_versions_with_retry(
@@ -78,9 +68,7 @@ pub async fn aks_versions(
         .await
         .map_err(|e| e.as_ref().clone())?;
 
-    Ok(HttpResponse::Ok().json(VersionsResponse {
-        versions: versions.to_vec(),
-    }))
+    Ok(HttpResponse::Ok().json(&*response_data))
 }
 
 #[get("/status")]
