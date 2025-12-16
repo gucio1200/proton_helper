@@ -19,6 +19,7 @@ jobs:
           - kodi_ask
           - az
           - aksver_mock
+          - multus-ct
     steps:
       # Checkout repository
       - name: Checkout code
