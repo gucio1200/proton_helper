@@ -194,7 +194,7 @@ pub async fn fetch_and_parse(
         releases,
         source_url: K8S_GITHUB_URL.to_string(),
         changelog_url: format!("{}/blob/master/CHANGELOG/README.md", K8S_GITHUB_URL),
-        homepage: "https://azure.microsoft.com/en-us/products/kubernetes-service".to_string(),
+        homepage: "https://kubernetes.io".to_string(),
     };
 
     Ok(Arc::new(response))
