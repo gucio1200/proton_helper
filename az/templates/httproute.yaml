@@ -1,0 +1,19 @@
+{{- /* Check if Gateway is enabled in values AND if the Cluster supports Gateway API v1 */ -}}
+{{- if and .Values.gateway.enabled (.Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1") -}}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}-route
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+  - name: {{ .Values.gateway.parentRef.name }}
+    namespace: {{ .Values.gateway.parentRef.namespace }}
+    sectionName: {{ .Release.Name }}-https
+  hostnames:
+  - {{ .Values.gateway.host }}
+  rules:
+  - backendRefs:
+    - name: {{ .Values.service.name }}
+      port: {{ .Values.service.port }}
+{{- end }}

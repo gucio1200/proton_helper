@@ -1,0 +1,6 @@
+{{- if and .Values.gateway.enabled (not (.Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1")) }}
+*** WARNING ***
+You enabled Gateway API integration (.Values.gateway.enabled=true), 
+but the "gateway.networking.k8s.io/v1" API was not found on this cluster.
+The HTTPRoute and XListenerSet resources were NOT deployed.
+{{- end }}

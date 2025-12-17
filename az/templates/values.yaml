@@ -1,0 +1,24 @@
+# --- Common Settings ---
+service:
+  name: my-app-service
+  port: 80
+
+# --- Legacy Ingress Configuration ---
+ingress:
+  enabled: true  # Toggle this to deploy standard Ingress
+  className: nginx
+  host: "legacy-api.example.com"
+  tls:
+    enabled: true
+    secretName: "legacy-tls-secret"
+
+# --- Modern Gateway API Configuration ---
+gateway:
+  enabled: true  # Toggle this to deploy HTTPRoute + XListenerSet
+  parentRef:
+    name: shared-gateway
+    namespace: infrastructure
+  host: "modern-api.example.com"
+  tls:
+    enabled: true
+    secretName: "modern-tls-secret" # Secret in the App Namespace
