@@ -1,0 +1,49 @@
+{{- /* Safety Check: Only run if enabled AND CRDs exist */ -}}
+{{- if and .Values.mode.useGateway (.Capabilities.APIVersions.Has "gateway.networking.k8s.io/v1") -}}
+
+# --- 1. The Listener Attachment (XListenerSet) ---
+apiVersion: gateway.networking.x-k8s.io/v1alpha1
+kind: XListenerSet
+metadata:
+  name: {{ .Release.Name }}-listener
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: {{ .Values.ingress.gatewayParent.name }}
+    namespace: {{ .Values.ingress.gatewayParent.namespace }}
+  listeners:
+  - name: {{ .Release.Name }}-https
+    protocol: HTTPS
+    port: 443
+    hostname: {{ .Values.ingress.host }}
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: {{ .Values.ingress.tlsSecret }}
+    allowedRoutes:
+      namespaces:
+        from: Same
+
+---
+
+# --- 2. The Routing Logic (HTTPRoute) ---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ .Release.Name }}-route
+  namespace: {{ .Release.Namespace }}
+spec:
+  parentRefs:
+  - name: {{ .Values.ingress.gatewayParent.name }}
+    namespace: {{ .Values.ingress.gatewayParent.namespace }}
+    sectionName: {{ .Release.Name }}-https
+  hostnames:
+  - {{ .Values.ingress.host }}
+  rules:
+  - backendRefs:
+    - name: {{ .Values.ingress.serviceName }}
+      port: {{ .Values.ingress.servicePort }}
+{{- end }}

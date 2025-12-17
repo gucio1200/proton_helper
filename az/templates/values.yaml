@@ -1,24 +1,17 @@
-# --- Common Settings ---
-service:
-  name: my-app-service
-  port: 80
+# --- Control Plane ---
+# Toggle which resources to generate
+mode:
+  useGateway: true   # If true, generates XListenerSet + HTTPRoute
+  useIngress: false  # If true, generates Legacy Ingress
 
-# --- Legacy Ingress Configuration ---
+# --- Main Configuration ---
 ingress:
-  enabled: true  # Toggle this to deploy standard Ingress
-  className: nginx
-  host: "legacy-api.example.com"
-  tls:
-    enabled: true
-    secretName: "legacy-tls-secret"
+  host: "my-app.example.com"
+  tlsSecret: "my-app-tls"
+  serviceName: "my-service"
+  servicePort: 80
 
-# --- Modern Gateway API Configuration ---
-gateway:
-  enabled: true  # Toggle this to deploy HTTPRoute + XListenerSet
-  parentRef:
-    name: shared-gateway
-    namespace: infrastructure
-  host: "modern-api.example.com"
-  tls:
-    enabled: true
-    secretName: "modern-tls-secret" # Secret in the App Namespace
+  # Specifics for the Gateway API (Only used if useGateway: true)
+  gatewayParent:
+    name: "shared-gateway"
+    namespace: "infrastructure"
