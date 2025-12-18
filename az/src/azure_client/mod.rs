@@ -8,7 +8,7 @@ use tracing::debug;
 pub mod retry;
 pub mod token;
 
-pub const AKS_API_VERSION: &str = "2020-11-01";
+pub const AKS_API_VERSION: &str = "2024-09-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 const K8S_GITHUB_URL: &str = "https://github.com/kubernetes/kubernetes";
 
