@@ -61,7 +61,7 @@ fn generate_changelog_url(version: &str) -> String {
     if parts.len() < 3 {
         return "".to_string();
     }
-    
+
     let major = parts[0];
     let minor = parts[1];
     let patch = parts[2];
