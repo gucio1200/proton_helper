@@ -42,11 +42,8 @@ struct KubernetesVersionsResponse {
 
 #[derive(Deserialize)]
 struct MinorVersionItem {
-    // e.g. "1.27" - Used only for grouping in Azure, we flatten it out.
     #[serde(rename = "version")]
     _family: String,
-
-    // Map of "1.27.3" -> PatchDetail
     #[serde(rename = "patchVersions", default)]
     patch_versions: HashMap<String, PatchDetail>,
 }
