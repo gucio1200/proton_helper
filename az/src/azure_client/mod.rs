@@ -2,13 +2,14 @@ use crate::errors::{AksError, AzureErrorBody};
 use reqwest::Client;
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::debug;
 
 pub mod retry;
 pub mod token;
 
-pub const AKS_API_VERSION: &str = "2023-11-01";
+pub const AKS_API_VERSION: &str = "2025-10-01";
 const AZURE_MGMT_BASE: &str = "https://management.azure.com";
 const K8S_GITHUB_URL: &str = "https://github.com/kubernetes/kubernetes";
 
@@ -35,19 +36,20 @@ pub struct RenovateRelease {
 // --- Internal structs ---
 // These structs strictly mirror the Azure Resource Manager (ARM) JSON response.
 #[derive(Deserialize)]
-struct OrchestratorsResponse {
-    properties: Properties,
+struct KubernetesVersionsResponse {
+    values: Vec<MinorVersionItem>,
 }
+
 #[derive(Deserialize)]
-struct Properties {
-    orchestrators: Vec<OrchestratorItem>,
+struct MinorVersionItem {
+    #[serde(rename = "version")]
+    _family: String,
+    #[serde(rename = "patchVersions", default)]
+    patch_versions: HashMap<String, PatchDetail>,
 }
+
 #[derive(Deserialize)]
-struct OrchestratorItem {
-    #[serde(rename = "orchestratorType")]
-    type_: String,
-    #[serde(rename = "orchestratorVersion")]
-    version: String,
+struct PatchDetail {
     #[serde(rename = "isPreview", default)]
     is_preview: bool,
 }
@@ -59,7 +61,7 @@ fn generate_changelog_url(version: &str) -> String {
     if parts.len() < 3 {
         return "".to_string();
     }
-    
+
     let major = parts[0];
     let minor = parts[1];
     let patch = parts[2];
@@ -83,7 +85,7 @@ pub async fn fetch_and_parse(
 ) -> Result<Arc<RenovateResponse>, AksError> {
     // 1. Construct the ARM Endpoint URL
     let url_str = format!(
-        "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/orchestrators?api-version={}",
+        "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/kubernetesVersions?api-version={}",
         AZURE_MGMT_BASE, subscription_id, location, AKS_API_VERSION
     );
 
@@ -156,22 +158,24 @@ pub async fn fetch_and_parse(
 
     // 6. Parse JSON Response
     // We parse from the `body_text` string we downloaded in step 3.
-    let json: OrchestratorsResponse =
+    let json: KubernetesVersionsResponse =
         serde_json::from_str(&body_text).map_err(|e| AksError::Parse(format!("JSON fail: {e}")))?;
 
     // 7. Filter, Transform, and Sort
     // We collect into a Vec of (Version, is_preview) tuples first to allow sorting
-    let mut version_tuples: Vec<(Version, bool)> = json
-        .properties
-        .orchestrators
-        .into_iter()
-        .filter(|o| o.type_ == "Kubernetes" && (show_preview || !o.is_preview))
-        .map(|o| {
-            Version::parse(&o.version)
-                .map(|v| (v, o.is_preview))
-                .map_err(|e| AksError::Parse(format!("SemVer fail: {e}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut version_tuples: Vec<(Version, bool)> = Vec::new();
+
+    for minor_ver in json.values {
+        for (patch_str, details) in minor_ver.patch_versions {
+            if !show_preview && details.is_preview {
+                continue;
+            }
+
+            if let Ok(v) = Version::parse(&patch_str) {
+                version_tuples.push((v, details.is_preview));
+            }
+        }
+    }
 
     // Sort by version
     version_tuples.sort_unstable_by(|a, b| a.0.cmp(&b.0));
