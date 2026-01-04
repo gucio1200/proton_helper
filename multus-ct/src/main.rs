@@ -1,13 +1,13 @@
-use futures::{Stream, StreamExt};
+use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::{
     api::{Api, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
         reflector,
-        reflector::ObjectRef,
+        reflector::{ObjectRef, Store},
         watcher,
-        watcher::Config,
+        WatchStreamExt,
     },
     Client, ResourceExt,
 };
@@ -19,10 +19,9 @@ use std::{
     sync::{atomic::{AtomicBool, Ordering}, Arc},
     time::Duration,
 };
-use warp::Filter;
+use warp::Filter; // Required for .boxed()
 
 // --- 1. CONSTANTS & METRICS ---
-// UPDATED: Standard Kubernetes taint key for critical components
 const TAINT_KEY: &str = "CriticalAddonsOnly";
 const LEASE_NAME: &str = "multus-controller-leader";
 
@@ -41,14 +40,20 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     // A. Configuration
-    // UPDATED: Defaults to match your namespace and selector requirements
     let namespace = env::var("NAMESPACE").unwrap_or_else(|_| "networking".to_string());
     let selector = env::var("MULTUS_LABEL_SELECTOR").unwrap_or_else(|_| "app.kubernetes.io/name=multus".to_string());
     let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
     let client = Client::try_default().await?;
 
-    // B. Metrics Server Setup
-    let metrics_route = warp::path("metrics").and(warp::get()).map(|| {
+    // B. Metrics & Health Server
+    // -----------------------------------------------------------------------
+    // FIX: logic for Warp + Tokio
+    // 1. Define routes.
+    // 2. call .boxed() at the end. This is critical for tokio::spawn.
+    // -----------------------------------------------------------------------
+    let health_route = warp::path("health").map(|| "ok".to_string());
+    
+    let metrics_route = warp::path("metrics").map(|| {
         let encoder = TextEncoder::new();
         let families = prometheus::gather();
         let mut buffer = vec![];
@@ -56,49 +61,50 @@ async fn main() -> anyhow::Result<()> {
         String::from_utf8(buffer).unwrap()
     });
 
-    let health_route = warp::path("health").and(warp::get()).map(|| "ok".to_string());
+    // .boxed() erases the complex types and standardizes lifetimes
+    let routes = health_route.or(metrics_route).boxed();
 
-    let routes = health_route.or(metrics_route);
-    let server_future = warp::serve(routes).run(([0, 0, 0, 0], 8080));
-
-    tokio::spawn(server_future);
+    tokio::spawn(async move {
+        warp::serve(routes).run(([0, 0, 0, 0], 8080)).await;
+    });
 
     // C. Leader Election
     let is_leader = start_leader_election(client.clone(), &namespace, &hostname);
 
     // D. Cache Setup
-    let (pod_store, pod_reflector_stream) = setup_pod_cache(client.clone(), &selector).await;
+    let pods_api = Api::<Pod>::all(client.clone());
+    let pod_config = watcher::Config::default().labels(&selector);
+    
+    let (pod_store, pod_writer) = reflector::store();
+    let pod_watcher = watcher(pods_api.clone(), pod_config.clone());
+    let pod_reflector = reflector::reflector(pod_writer, pod_watcher);
+    
     tokio::spawn(async move {
-        pod_reflector_stream.for_each(|_| async {}).await;
+        let _ = pod_reflector.applied_objects().try_for_each(|_| async { Ok(()) }).await;
     });
 
-    // E. Shared Context
-    let context = Arc::new(Context {
+    tracing::info!("🚀 Controller started. Watching Nodes & Pods...");
+
+    // E. Main Controller Loop
+    let nodes_api = Api::<Node>::all(client.clone());
+    let ctx = Arc::new(Context {
         client: client.clone(),
         pod_store,
         is_leader,
     });
 
-    // F. Run Controller
-    tracing::info!("🚀 Starting Multus Controller");
-    let nodes_api = Api::<Node>::all(client.clone());
-    let pods_api = Api::<Pod>::all(client.clone());
-    
-    // Watch pods to trigger node reconciliation
-    let pod_config = Config::default().labels(&selector).fields("status.phase=Running");
-
-    Controller::new(nodes_api, Config::default())
-        .with_config(kube::runtime::controller::Config::default().concurrency(5))
+    Controller::new(nodes_api, watcher::Config::default())
+        .with_config(kube::runtime::controller::Config::default().concurrency(10))
         .watches(
             pods_api,
-            pod_config,
-            |pod: Pod| {
+            pod_config, 
+            |pod| {
                 pod.spec.as_ref()
                     .and_then(|s| s.node_name.clone())
                     .map(|name| ObjectRef::<Node>::new(name.as_str()))
             },
         )
-        .run(reconcile, error_policy, context)
+        .run(reconcile, error_policy, ctx)
         .for_each(|_| async {})
         .await;
 
@@ -108,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 // --- 3. RECONCILIATION LOGIC ---
 struct Context {
     client: Client,
-    pod_store: reflector::Store<Pod>,
+    pod_store: Store<Pod>,
     is_leader: Arc<AtomicBool>,
 }
 
@@ -119,111 +125,124 @@ async fn reconcile(node: Arc<Node>, ctx: Arc<Context>) -> Result<Action, kube::E
 
     let _timer = RECONCILE_DURATION.start_timer();
     let node_name = node.name_any();
+    let client = &ctx.client;
 
-    // Check Memory Cache: Is a valid Multus pod running on this node?
     let is_multus_ready = ctx.pod_store.state().iter().any(|pod| {
-        pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(&node_name)
+        let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(&node_name);
+        let phase_running = pod.status.as_ref().map(|s| s.phase.as_deref() == Some("Running")).unwrap_or(false);
+        
+        let conditions_ready = pod.status.as_ref().and_then(|s| s.conditions.as_ref()).map(|conds| {
+            conds.iter().any(|c| c.type_ == "Ready" && c.status == "True")
+        }).unwrap_or(false);
+
+        on_node && phase_running && conditions_ready
     });
 
-    // Apply Logic
-    // If multus is NOT ready, we WANT the taint (true).
-    // If multus IS ready, we do NOT want the taint (false).
-    ensure_taint(&ctx.client, &node, !is_multus_ready).await?;
+    let should_taint = !is_multus_ready;
 
-    Ok(Action::await_change())
+    ensure_taint_state(client, &node_name, should_taint).await?;
+
+    Ok(Action::requeue(Duration::from_secs(300)))
 }
 
-async fn ensure_taint(client: &Client, node: &Node, want_taint: bool) -> Result<(), kube::Error> {
-    let api: Api<Node> = Api::all(client.clone());
-    let node_name = node.name_any();
+async fn ensure_taint_state(client: &Client, node_name: &str, want_taint: bool) -> Result<(), kube::Error> {
+    let nodes: Api<Node> = Api::all(client.clone());
+    
+    for _ in 0..5 {
+        let node = nodes.get(node_name).await?;
+        
+        let current_taints = node.spec.as_ref()
+            .and_then(|s| s.taints.clone())
+            .unwrap_or_default();
 
-    // Retry loop for conflict resolution
-    for i in 0..3 {
-        let target_node = if i == 0 { node } else { &api.get(&node_name).await? };
-
-        let current_taints = target_node.spec.as_ref().and_then(|s| s.taints.clone()).unwrap_or_default();
         let has_taint = current_taints.iter().any(|t| t.key == TAINT_KEY);
 
-        if has_taint == want_taint { return Ok(()); }
+        if has_taint == want_taint {
+            return Ok(());
+        }
 
         let mut new_taints = current_taints.clone();
         if want_taint {
-            new_taints.push(k8s_openapi::api::core::v1::Taint {
-                key: TAINT_KEY.to_string(),
-                // UPDATED: Value is None for "CriticalAddonsOnly" (implies Exists operator behavior)
-                value: None, 
-                effect: "NoSchedule".to_string(),
-                time_added: None,
-            });
+            if !has_taint {
+                tracing::info!("🔒 Tainting node {}", node_name);
+                new_taints.push(k8s_openapi::api::core::v1::Taint {
+                    key: TAINT_KEY.to_string(),
+                    value: None, 
+                    effect: "NoSchedule".to_string(),
+                    time_added: None,
+                });
+            }
         } else {
-            new_taints.retain(|t| t.key != TAINT_KEY);
+            if has_taint {
+                tracing::info!("🔓 Untainting node {}", node_name);
+                new_taints.retain(|t| t.key != TAINT_KEY);
+            }
         }
 
-        // Use JSON Patch to minimize conflicts
-        let patch_json = json!([
-            { "op": "test", "path": "/metadata/resourceVersion", "value": target_node.resource_version() },
-            { "op": "replace", "path": "/spec/taints", "value": new_taints }
-        ]);
+        let patch_json = json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {
+                "resourceVersion": node.resource_version(),
+            },
+            "spec": {
+                "taints": new_taints
+            }
+        });
 
-        let patch: json_patch::Patch = serde_json::from_value(patch_json).map_err(kube::Error::SerdeError)?;
-
-        match api.patch(&node_name, &PatchParams::default(), &Patch::<()>::Json(patch)).await {
+        let params = PatchParams::default();
+        match nodes.patch(node_name, &params, &Patch::Merge(patch_json)).await {
             Ok(_) => {
                 TAINT_OPERATIONS.inc();
-                tracing::info!(node = %node_name, action = %if want_taint { "TAINTED (CriticalAddonsOnly)" } else { "UNTAINTED" }, "State updated");
                 return Ok(());
             },
-            // Retry on conflict (409) or unprocessable entity (422)
-            Err(kube::Error::Api(ae)) if ae.code == 409 || ae.code == 422 => continue,
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                tracing::warn!("Conflict updating node {}, retrying...", node_name);
+                continue;
+            },
             Err(e) => return Err(e),
         }
     }
-    Ok(())
+    
+    Err(kube::Error::Api(kube::error::ErrorResponse {
+        status: "Failure".to_string(),
+        message: "Failed to update node taints after retries".to_string(),
+        reason: "Conflict".to_string(),
+        code: 500,
+    }))
 }
 
-fn error_policy(_node: Arc<Node>, _err: &kube::Error, _ctx: Arc<Context>) -> Action {
+// --- 4. HELPERS ---
+
+fn error_policy(_node: Arc<Node>, err: &kube::Error, _ctx: Arc<Context>) -> Action {
+    tracing::error!("Reconcile error: {:?}", err);
     Action::requeue(Duration::from_secs(5))
-}
-
-// --- 4. INFRASTRUCTURE HELPERS ---
-
-async fn setup_pod_cache(client: Client, selector: &str) -> (
-    reflector::Store<Pod>,
-    impl Stream<Item = Result<watcher::Event<Pod>, watcher::Error>> + Send + Unpin + 'static
-) {
-    let api = Api::<Pod>::all(client);
-    let (store, writer) = reflector::store();
-    let config = Config::default().labels(selector).fields("status.phase=Running");
-
-    let mut reflector_stream = reflector::reflector(writer, watcher(api, config)).boxed();
-
-    tracing::info!("⏳ Waiting for cache sync...");
-    let _ = reflector_stream.next().await;
-    tracing::info!("✅ Cache synced");
-
-    (store, reflector_stream)
 }
 
 fn start_leader_election(client: Client, ns: &str, hostname: &str) -> Arc<AtomicBool> {
     let is_leader = Arc::new(AtomicBool::new(false));
     let flag = is_leader.clone();
-    let params = LeaseLockParams {
-        holder_id: hostname.to_string(),
-        lease_name: LEASE_NAME.to_string(),
-        lease_ttl: Duration::from_secs(15),
-    };
-    let lock = LeaseLock::new(client, ns, params);
+    let lease_name = LEASE_NAME.to_string();
+    let hostname = hostname.to_string();
+    let ns = ns.to_string();
 
     tokio::spawn(async move {
         loop {
+            let params = LeaseLockParams {
+                holder_id: hostname.clone(),
+                lease_name: lease_name.clone(),
+                lease_ttl: Duration::from_secs(15),
+            };
+            let lock = LeaseLock::new(client.clone(), &ns, params);
+            
             match lock.try_acquire_or_renew().await {
                 Ok(lease) => {
                     if lease.acquired_lease != flag.load(Ordering::Relaxed) {
-                        tracing::info!("👑 Leadership status changed: {}", lease.acquired_lease);
+                        tracing::info!("👑 Leader State Change: {}", lease.acquired_lease);
                         flag.store(lease.acquired_lease, Ordering::Relaxed);
                     }
                 },
-                Err(e) => tracing::error!("Leader Election failure: {}", e),
+                Err(e) => tracing::warn!("Leader election error: {}", e),
             }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
