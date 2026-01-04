@@ -970,7 +970,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "multus-controller"
+name = "multus-ct"
 version = "0.1.0"
 dependencies = [
  "anyhow",

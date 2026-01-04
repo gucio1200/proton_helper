@@ -22,7 +22,8 @@ use std::{
 use warp::Filter;
 
 // --- 1. CONSTANTS & METRICS ---
-const TAINT_KEY: &str = "multus.network.k8s.io/readiness";
+// UPDATED: Standard Kubernetes taint key for critical components
+const TAINT_KEY: &str = "CriticalAddonsOnly";
 const LEASE_NAME: &str = "multus-controller-leader";
 
 lazy_static::lazy_static! {
@@ -38,16 +39,15 @@ lazy_static::lazy_static! {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
-    
+
     // A. Configuration
-    let namespace = env::var("NAMESPACE").unwrap_or_else(|_| "kube-system".to_string());
-    let selector = env::var("MULTUS_LABEL_SELECTOR").unwrap_or_else(|_| "app=multus".to_string());
+    // UPDATED: Defaults to match your namespace and selector requirements
+    let namespace = env::var("NAMESPACE").unwrap_or_else(|_| "networking".to_string());
+    let selector = env::var("MULTUS_LABEL_SELECTOR").unwrap_or_else(|_| "app.kubernetes.io/name=multus".to_string());
     let hostname = env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".to_string());
     let client = Client::try_default().await?;
 
     // B. Metrics Server Setup
-    // FIX: Define routes and create the server future *before* spawning.
-    // This prevents the compiler from confusing lifetimes inside an async block.
     let metrics_route = warp::path("metrics").and(warp::get()).map(|| {
         let encoder = TextEncoder::new();
         let families = prometheus::gather();
@@ -55,15 +55,14 @@ async fn main() -> anyhow::Result<()> {
         encoder.encode(&families, &mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()
     });
-    
+
     let health_route = warp::path("health").and(warp::get()).map(|| "ok".to_string());
-    
+
     let routes = health_route.or(metrics_route);
     let server_future = warp::serve(routes).run(([0, 0, 0, 0], 8080));
-    
-    // FIX: Spawn the future directly. Do not wrap it in 'async move { ... }'
+
     tokio::spawn(server_future);
-    
+
     // C. Leader Election
     let is_leader = start_leader_election(client.clone(), &namespace, &hostname);
 
@@ -84,6 +83,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("🚀 Starting Multus Controller");
     let nodes_api = Api::<Node>::all(client.clone());
     let pods_api = Api::<Pod>::all(client.clone());
+    
+    // Watch pods to trigger node reconciliation
     let pod_config = Config::default().labels(&selector).fields("status.phase=Running");
 
     Controller::new(nodes_api, Config::default())
@@ -118,13 +119,15 @@ async fn reconcile(node: Arc<Node>, ctx: Arc<Context>) -> Result<Action, kube::E
 
     let _timer = RECONCILE_DURATION.start_timer();
     let node_name = node.name_any();
-    
-    // Check Memory Cache
+
+    // Check Memory Cache: Is a valid Multus pod running on this node?
     let is_multus_ready = ctx.pod_store.state().iter().any(|pod| {
         pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(&node_name)
     });
 
     // Apply Logic
+    // If multus is NOT ready, we WANT the taint (true).
+    // If multus IS ready, we do NOT want the taint (false).
     ensure_taint(&ctx.client, &node, !is_multus_ready).await?;
 
     Ok(Action::await_change())
@@ -134,9 +137,10 @@ async fn ensure_taint(client: &Client, node: &Node, want_taint: bool) -> Result<
     let api: Api<Node> = Api::all(client.clone());
     let node_name = node.name_any();
 
+    // Retry loop for conflict resolution
     for i in 0..3 {
         let target_node = if i == 0 { node } else { &api.get(&node_name).await? };
-        
+
         let current_taints = target_node.spec.as_ref().and_then(|s| s.taints.clone()).unwrap_or_default();
         let has_taint = current_taints.iter().any(|t| t.key == TAINT_KEY);
 
@@ -146,7 +150,8 @@ async fn ensure_taint(client: &Client, node: &Node, want_taint: bool) -> Result<
         if want_taint {
             new_taints.push(k8s_openapi::api::core::v1::Taint {
                 key: TAINT_KEY.to_string(),
-                value: Some("false".to_string()),
+                // UPDATED: Value is None for "CriticalAddonsOnly" (implies Exists operator behavior)
+                value: None, 
                 effect: "NoSchedule".to_string(),
                 time_added: None,
             });
@@ -154,19 +159,21 @@ async fn ensure_taint(client: &Client, node: &Node, want_taint: bool) -> Result<
             new_taints.retain(|t| t.key != TAINT_KEY);
         }
 
+        // Use JSON Patch to minimize conflicts
         let patch_json = json!([
             { "op": "test", "path": "/metadata/resourceVersion", "value": target_node.resource_version() },
             { "op": "replace", "path": "/spec/taints", "value": new_taints }
         ]);
-        
+
         let patch: json_patch::Patch = serde_json::from_value(patch_json).map_err(kube::Error::SerdeError)?;
 
         match api.patch(&node_name, &PatchParams::default(), &Patch::<()>::Json(patch)).await {
             Ok(_) => {
                 TAINT_OPERATIONS.inc();
-                tracing::info!(node = %node_name, action = %if want_taint { "TAINTED" } else { "UNTAINTED" }, "State updated");
+                tracing::info!(node = %node_name, action = %if want_taint { "TAINTED (CriticalAddonsOnly)" } else { "UNTAINTED" }, "State updated");
                 return Ok(());
             },
+            // Retry on conflict (409) or unprocessable entity (422)
             Err(kube::Error::Api(ae)) if ae.code == 409 || ae.code == 422 => continue,
             Err(e) => return Err(e),
         }
@@ -181,17 +188,17 @@ fn error_policy(_node: Arc<Node>, _err: &kube::Error, _ctx: Arc<Context>) -> Act
 // --- 4. INFRASTRUCTURE HELPERS ---
 
 async fn setup_pod_cache(client: Client, selector: &str) -> (
-    reflector::Store<Pod>, 
+    reflector::Store<Pod>,
     impl Stream<Item = Result<watcher::Event<Pod>, watcher::Error>> + Send + Unpin + 'static
 ) {
     let api = Api::<Pod>::all(client);
     let (store, writer) = reflector::store();
     let config = Config::default().labels(selector).fields("status.phase=Running");
-    
+
     let mut reflector_stream = reflector::reflector(writer, watcher(api, config)).boxed();
-    
+
     tracing::info!("⏳ Waiting for cache sync...");
-    let _ = reflector_stream.next().await; 
+    let _ = reflector_stream.next().await;
     tracing::info!("✅ Cache synced");
 
     (store, reflector_stream)
