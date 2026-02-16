@@ -1,13 +1,12 @@
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::{
     api::{Api, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
         reflector,
-        reflector::{ObjectRef, Store},
+        reflector::ObjectRef,
         watcher,
-        WatchStreamExt,
     },
     Client, ResourceExt,
 };
@@ -20,6 +19,9 @@ use std::{
     time::Duration,
 };
 use warp::Filter; // Required for .boxed()
+
+mod state;
+use state::NodeIndex;
 
 // --- 1. CONSTANTS & METRICS ---
 const TAINT_KEY: &str = "CriticalAddonsOnly";
@@ -75,12 +77,29 @@ async fn main() -> anyhow::Result<()> {
     let pods_api = Api::<Pod>::all(client.clone());
     let pod_config = watcher::Config::default().labels(&selector);
     
-    let (pod_store, pod_writer) = reflector::store();
+    let (_pod_store, pod_writer) = reflector::store();
     let pod_watcher = watcher(pods_api.clone(), pod_config.clone());
     let pod_reflector = reflector::reflector(pod_writer, pod_watcher);
     
+    let node_index = NodeIndex::new();
+    let node_index_clone = node_index.clone();
+
     tokio::spawn(async move {
-        let _ = pod_reflector.applied_objects().try_for_each(|_| async { Ok(()) }).await;
+        // We use `applied_objects()` which is a stream of `Result<Event<Pod>, Error>`.
+        // Wait, `applied_objects()` returns Objects, not Events.
+        // `reflector` implements `Stream` yielding `Result<Event<K>, ...>`.
+        // So just iterate `pod_reflector`.
+        use futures::StreamExt;
+        
+        pod_reflector.for_each(|res| {
+            let idx = node_index_clone.clone();
+            async move {
+                match res {
+                    Ok(event) => idx.update(&event),
+                    Err(e) => tracing::warn!("Pod watcher error: {}", e),
+                }
+            }
+        }).await;
     });
 
     tracing::info!("🚀 Controller started. Watching Nodes & Pods...");
@@ -89,8 +108,8 @@ async fn main() -> anyhow::Result<()> {
     let nodes_api = Api::<Node>::all(client.clone());
     let ctx = Arc::new(Context {
         client: client.clone(),
-        pod_store,
         is_leader,
+        node_index,
     });
 
     Controller::new(nodes_api, watcher::Config::default())
@@ -114,8 +133,8 @@ async fn main() -> anyhow::Result<()> {
 // --- 3. RECONCILIATION LOGIC ---
 struct Context {
     client: Client,
-    pod_store: Store<Pod>,
     is_leader: Arc<AtomicBool>,
+    node_index: NodeIndex,
 }
 
 async fn reconcile(node: Arc<Node>, ctx: Arc<Context>) -> Result<Action, kube::Error> {
@@ -127,20 +146,24 @@ async fn reconcile(node: Arc<Node>, ctx: Arc<Context>) -> Result<Action, kube::E
     let node_name = node.name_any();
     let client = &ctx.client;
 
-    let is_multus_ready = ctx.pod_store.state().iter().any(|pod| {
-        let on_node = pod.spec.as_ref().and_then(|s| s.node_name.as_deref()) == Some(&node_name);
-        let phase_running = pod.status.as_ref().map(|s| s.phase.as_deref() == Some("Running")).unwrap_or(false);
-        
-        let conditions_ready = pod.status.as_ref().and_then(|s| s.conditions.as_ref()).map(|conds| {
-            conds.iter().any(|c| c.type_ == "Ready" && c.status == "True")
-        }).unwrap_or(false);
+    // Fast O(1) Check using Index
+    let is_multus_ready = ctx.node_index.is_node_ready(&node_name);
 
-        on_node && phase_running && conditions_ready
-    });
+    let want_taint = !is_multus_ready;
 
-    let should_taint = !is_multus_ready;
+    // Incremental Check: Check cached node first to avoid unnecessary API calls
+    let current_taints = node.spec.as_ref()
+        .and_then(|s| s.taints.as_ref())
+        .map(|t| t.as_slice())
+        .unwrap_or(&[]);
+    
+    let has_taint = current_taints.iter().any(|t| t.key == TAINT_KEY);
 
-    ensure_taint_state(client, &node_name, should_taint).await?;
+    if has_taint == want_taint {
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
+    ensure_taint_state(client, &node_name, want_taint).await?;
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }
