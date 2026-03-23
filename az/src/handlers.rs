@@ -4,15 +4,28 @@ use crate::state::AppState;
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::ops::Deref;
 use std::sync::OnceLock;
 use tracing::instrument;
 
 // --- STATIC RESOURCES ---
 
+fn parse_show_preview<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<String>::deserialize(deserializer)?;
+    match opt.as_deref() {
+        Some("") | Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct QueryParams {
+    #[serde(default, deserialize_with = "parse_show_preview")]
     pub show_preview: Option<bool>,
 }
 
