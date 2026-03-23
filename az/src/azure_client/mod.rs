@@ -51,6 +51,8 @@ struct KubernetesVersionsResponse {
 struct MinorVersionItem {
     #[serde(rename = "version")]
     _family: String,
+    #[serde(rename = "isPreview", default)]
+    is_preview: bool,
     #[serde(rename = "patchVersions", default)]
     patch_versions: HashMap<String, PatchDetail>,
 }
@@ -176,13 +178,19 @@ pub async fn fetch_and_parse(
     let mut upgrades_map: HashMap<String, Vec<String>> = HashMap::new();
 
     for minor_ver in json.values {
+        let minor_is_preview = minor_ver.is_preview;
+
         for (patch_str, details) in minor_ver.patch_versions {
-            if !show_preview && details.is_preview {
+            // A patch is a preview if EITHER the specific patch is marked as preview,
+            // OR the entire minor version family is marked as preview.
+            let is_preview = minor_is_preview || details.is_preview;
+
+            if !show_preview && is_preview {
                 continue;
             }
 
             if let Ok(v) = Version::parse(&patch_str) {
-                version_tuples.push((v, details.is_preview));
+                version_tuples.push((v, is_preview));
                 upgrades_map.insert(patch_str.clone(), details.upgrades);
             }
         }
