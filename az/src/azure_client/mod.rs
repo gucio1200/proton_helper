@@ -17,6 +17,13 @@ const K8S_GITHUB_URL: &str = "https://github.com/kubernetes/kubernetes";
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
+pub struct AksVersionData {
+    pub all_releases: RenovateResponse,
+    pub upgrades_map: HashMap<String, Vec<String>>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct RenovateResponse {
     pub releases: Vec<RenovateRelease>,
     pub source_url: String,
@@ -52,6 +59,8 @@ struct MinorVersionItem {
 struct PatchDetail {
     #[serde(rename = "isPreview", default)]
     is_preview: bool,
+    #[serde(default)]
+    upgrades: Vec<String>,
 }
 
 // --- Helper Functions ---
@@ -82,7 +91,7 @@ pub async fn fetch_and_parse(
     location: &str,
     token: &str,
     show_preview: bool,
-) -> Result<Arc<RenovateResponse>, AksError> {
+) -> Result<Arc<AksVersionData>, AksError> {
     // 1. Construct the ARM Endpoint URL
     let url_str = format!(
         "{}/subscriptions/{}/providers/Microsoft.ContainerService/locations/{}/kubernetesVersions?api-version={}",
@@ -164,6 +173,7 @@ pub async fn fetch_and_parse(
     // 7. Filter, Transform, and Sort
     // We collect into a Vec of (Version, is_preview) tuples first to allow sorting
     let mut version_tuples: Vec<(Version, bool)> = Vec::new();
+    let mut upgrades_map: HashMap<String, Vec<String>> = HashMap::new();
 
     for minor_ver in json.values {
         for (patch_str, details) in minor_ver.patch_versions {
@@ -173,6 +183,7 @@ pub async fn fetch_and_parse(
 
             if let Ok(v) = Version::parse(&patch_str) {
                 version_tuples.push((v, details.is_preview));
+                upgrades_map.insert(patch_str.clone(), details.upgrades);
             }
         }
     }
@@ -201,5 +212,8 @@ pub async fn fetch_and_parse(
         homepage: "https://kubernetes.io".to_string(),
     };
 
-    Ok(Arc::new(response))
+    Ok(Arc::new(AksVersionData {
+        all_releases: response,
+        upgrades_map,
+    }))
 }

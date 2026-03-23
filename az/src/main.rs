@@ -13,7 +13,7 @@ mod worker;
 
 use azure_client::token::refresh_and_cache_token;
 use config::Config;
-use handlers::{aks_versions, status};
+use handlers::{aks_list, aks_upgrades, status};
 use state::AppState;
 
 #[actix_web::main]
@@ -48,10 +48,9 @@ async fn main() -> Result<()> {
             .app_data(app_data.clone())
             .wrap(RequestIdentifier::with_uuid())
             .wrap(Logger::default())
-            // Register specific paths FIRST to avoid wildcard capture.
-            // "status" matches the wildcard {location}, so it MUST be defined before aks_versions.
             .service(status)
-            .service(aks_versions)
+            .service(aks_upgrades)
+            .service(aks_list)
     })
     .bind(("0.0.0.0", config.port))?
     .run()

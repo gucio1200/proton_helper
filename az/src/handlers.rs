@@ -19,7 +19,7 @@ static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 #[get("/{location}")]
 #[instrument(skip(state, req_id), fields(location = %path))]
-pub async fn aks_versions(
+pub async fn aks_list(
     path: web::Path<String>,
     state: web::Data<AppState>,
     req_id: web::ReqData<RequestId>,
@@ -68,7 +68,60 @@ pub async fn aks_versions(
         .await
         .map_err(|e| e.as_ref().clone())?;
 
-    Ok(HttpResponse::Ok().json(&*response_data))
+    Ok(HttpResponse::Ok().json(&response_data.all_releases))
+}
+
+#[get("/{location}/{version}")]
+#[instrument(skip(state, req_id), fields(location = %path.0, version = %path.1))]
+pub async fn aks_upgrades(
+    path: web::Path<(String, String)>,
+    state: web::Data<AppState>,
+    req_id: web::ReqData<RequestId>,
+) -> Result<impl Responder, AksError> {
+    let (location, version) = path.into_inner();
+    let location = location.trim();
+    let version = version.trim();
+
+    // 1. Basic Validation
+    if location.is_empty() || version.is_empty() {
+        return Err(AksError::Validation);
+    }
+
+    // 2. "Fail Fast" Regex Check
+    let re = LOCATION_REGEX.get_or_init(|| Regex::new(r"^[a-zA-Z0-9]+$").unwrap());
+
+    if !re.is_match(location) {
+        return Err(AksError::InvalidLocation {
+            location: location.to_string(),
+            details: "Location contains invalid characters (alphanumeric only).".to_string(),
+        });
+    }
+
+    tracing::Span::current().record("request_id", req_id.deref().as_str());
+
+    // 3. Cache-Aside Pattern
+    let response_data = state
+        .cache
+        .try_get_with(state.cache_key(location), async {
+            fetch_versions_with_retry(
+                &state.http_client,
+                &state.subscription_id,
+                location,
+                &state.token_cache,
+                state.show_preview,
+            )
+            .await
+        })
+        .await
+        .map_err(|e| e.as_ref().clone())?;
+
+    let upgrades = response_data
+        .upgrades_map
+        .get(version)
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(HttpResponse::Ok().json(upgrades))
 }
 
 #[get("/status")]

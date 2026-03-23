@@ -1,8 +1,8 @@
 use super::fetch_and_parse;
 use crate::azure_client::token::{get_token_from_cache, TokenCache};
-use crate::azure_client::RenovateResponse;
+use crate::azure_client::AksVersionData;
 use crate::errors::AksError;
-use rand::Rng;
+use rand::RngExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_retry::{strategy::ExponentialBackoff, RetryIf};
@@ -38,7 +38,7 @@ pub async fn fetch_versions_with_retry(
     location: &str,
     token_cache: &TokenCache,
     show_preview: bool,
-) -> Result<Arc<RenovateResponse>, AksError> {
+) -> Result<Arc<AksVersionData>, AksError> {
     let mut rng = rand::rng();
 
     // Exponential backoff with jitter
