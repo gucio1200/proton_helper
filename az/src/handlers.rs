@@ -4,11 +4,17 @@ use crate::state::AppState;
 use actix_request_identifier::RequestId;
 use actix_web::{get, web, HttpResponse, Responder};
 use regex::Regex;
+use serde::Deserialize;
 use std::ops::Deref;
 use std::sync::OnceLock;
 use tracing::instrument;
 
 // --- STATIC RESOURCES ---
+
+#[derive(Debug, Deserialize)]
+pub struct QueryParams {
+    pub show_preview: Option<bool>,
+}
 
 // Global Regex for validating locations.
 // We use OnceLock to compile this exactly once on the first request,
@@ -21,6 +27,7 @@ static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 #[instrument(skip(state, req_id), fields(location = %path))]
 pub async fn aks_list(
     path: web::Path<String>,
+    query: web::Query<QueryParams>,
     state: web::Data<AppState>,
     req_id: web::ReqData<RequestId>,
 ) -> Result<impl Responder, AksError> {
@@ -49,19 +56,21 @@ pub async fn aks_list(
 
     tracing::Span::current().record("request_id", req_id.deref().as_str());
 
+    let effective_show_preview = query.show_preview.unwrap_or(state.show_preview);
+
     // 3. Cache-Aside Pattern
     // - Check Moka cache for this location.
     // - If miss: Execute the async block (fetch with retry).
     // - If hit: Return cached data instantly.
     let response_data = state
         .cache
-        .try_get_with(state.cache_key(location), async {
+        .try_get_with(state.cache_key(location, effective_show_preview), async {
             fetch_versions_with_retry(
                 &state.http_client,
                 &state.subscription_id,
                 location,
                 &state.token_cache,
-                state.show_preview,
+                effective_show_preview,
             )
             .await
         })
@@ -75,6 +84,7 @@ pub async fn aks_list(
 #[instrument(skip(state, req_id), fields(location = %path.0, version = %path.1))]
 pub async fn aks_upgrades(
     path: web::Path<(String, String)>,
+    query: web::Query<QueryParams>,
     state: web::Data<AppState>,
     req_id: web::ReqData<RequestId>,
 ) -> Result<impl Responder, AksError> {
@@ -99,16 +109,18 @@ pub async fn aks_upgrades(
 
     tracing::Span::current().record("request_id", req_id.deref().as_str());
 
+    let effective_show_preview = query.show_preview.unwrap_or(state.show_preview);
+
     // 3. Cache-Aside Pattern
     let response_data = state
         .cache
-        .try_get_with(state.cache_key(location), async {
+        .try_get_with(state.cache_key(location, effective_show_preview), async {
             fetch_versions_with_retry(
                 &state.http_client,
                 &state.subscription_id,
                 location,
                 &state.token_cache,
-                state.show_preview,
+                effective_show_preview,
             )
             .await
         })

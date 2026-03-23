@@ -81,10 +81,10 @@ impl AppState {
         })
     }
 
-    pub fn cache_key(&self, location: &str) -> String {
+    pub fn cache_key(&self, location: &str, show_preview: bool) -> String {
         format!(
             "{}:{}:{}",
-            self.subscription_id, location, self.show_preview
+            self.subscription_id, location, show_preview
         )
     }
 
