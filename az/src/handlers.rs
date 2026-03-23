@@ -25,7 +25,7 @@ static LOCATION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 #[get("/{location}")]
 #[instrument(skip(state, req_id), fields(location = %path))]
-pub async fn aks_list(
+pub async fn aks_location(
     path: web::Path<String>,
     query: web::Query<QueryParams>,
     state: web::Data<AppState>,
@@ -82,7 +82,7 @@ pub async fn aks_list(
 
 #[get("/{location}/{version}")]
 #[instrument(skip(state, req_id), fields(location = %path.0, version = %path.1))]
-pub async fn aks_upgrades(
+pub async fn aks_versions(
     path: web::Path<(String, String)>,
     query: web::Query<QueryParams>,
     state: web::Data<AppState>,

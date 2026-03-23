@@ -13,7 +13,7 @@ mod worker;
 
 use azure_client::token::refresh_and_cache_token;
 use config::Config;
-use handlers::{aks_list, aks_upgrades, status};
+use handlers::{aks_location, aks_versions, status};
 use state::AppState;
 
 #[actix_web::main]
@@ -49,8 +49,8 @@ async fn main() -> Result<()> {
             .wrap(RequestIdentifier::with_uuid())
             .wrap(Logger::default())
             .service(status)
-            .service(aks_upgrades)
-            .service(aks_list)
+            .service(aks_versions)
+            .service(aks_location)
     })
     .bind(("0.0.0.0", config.port))?
     .run()
