@@ -115,13 +115,28 @@ pub async fn aks_upgrades(
         .await
         .map_err(|e| e.as_ref().clone())?;
 
-    let upgrades = response_data
+    let upgrade_versions = response_data
         .upgrades_map
         .get(version)
         .cloned()
         .unwrap_or_default();
 
-    Ok(HttpResponse::Ok().json(upgrades))
+    let upgrade_releases: Vec<_> = response_data
+        .all_releases
+        .releases
+        .iter()
+        .filter(|r| upgrade_versions.contains(&r.version))
+        .cloned()
+        .collect();
+
+    let upgrades_response = crate::azure_client::RenovateResponse {
+        releases: upgrade_releases,
+        source_url: response_data.all_releases.source_url.clone(),
+        changelog_url: response_data.all_releases.changelog_url.clone(),
+        homepage: response_data.all_releases.homepage.clone(),
+    };
+
+    Ok(HttpResponse::Ok().json(&upgrades_response))
 }
 
 #[get("/status")]
