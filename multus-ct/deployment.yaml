@@ -113,7 +113,7 @@ spec:
               value: "info,multus_ct=debug"
             - name: MULTUS_LABEL_SELECTOR
               value: "app.kubernetes.io/name=multus"
-            # Taints left by earlier versions under this key or a valueless CriticalAddonsOnly are cleaned up automatically.
+            # Only taints with this key are managed; every other taint on a node is left alone.
             - name: TAINT_KEY
               value: "multus.network.k8s.io/readiness"
             - name: NAMESPACE
