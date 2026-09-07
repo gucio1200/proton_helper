@@ -20,7 +20,7 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
+  - apiGroups: ["events.k8s.io"]
     resources: ["events"]
     verbs: ["create", "patch"]
 
