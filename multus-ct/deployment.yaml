@@ -1,5 +1,4 @@
 ---
-# 1. Service Account (Moved to networking)
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -9,8 +8,7 @@ metadata:
     app: multus-controller
 
 ---
-# 2. RBAC: Cluster-wide permissions (Nodes & Pods)
-# Note: ClusterRole is non-namespaced, so it stays the same.
+# Cluster-wide: read nodes and pods, patch node taints, record events on nodes.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -22,9 +20,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 
 ---
-# Binding needs to point to the ServiceAccount in 'networking'
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -32,19 +32,19 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: multus-controller
-    namespace: networking # <--- UPDATED
+    namespace: networking
 roleRef:
   kind: ClusterRole
   name: multus-controller-runner
   apiGroup: rbac.authorization.k8s.io
 
 ---
-# 3. RBAC: Leader Election (Scoped to networking)
+# Leader election lease lives in the controller's own namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: multus-controller-leader-election
-  namespace: networking # <--- UPDATED
+  namespace: networking
 rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -55,7 +55,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: multus-controller-leader-election-binding
-  namespace: networking # <--- UPDATED
+  namespace: networking
 subjects:
   - kind: ServiceAccount
     name: multus-controller
@@ -66,12 +66,11 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
-# 4. Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: multus-controller
-  namespace: networking # <--- UPDATED
+  namespace: networking
   labels:
     app: multus-controller
 spec:
@@ -91,47 +90,52 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
+      # Keep the two replicas apart so one drained node cannot take both down.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: multus-controller
       containers:
         - name: controller
+          # Rebuild from this source and bump the tag; 63c1659 predates these changes.
           image: unixology/multus-ct:63c1659
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
               name: http-metrics
-          
           env:
             - name: RUST_LOG
-              value: "info,multus_controller=debug"
-            
-            # --- UPDATED SELECTOR ---
+              value: "info,multus_ct=debug"
             - name: MULTUS_LABEL_SELECTOR
               value: "app.kubernetes.io/name=multus"
-
-            # This will now automatically pick up "networking"
+            # Only taints with this key are managed; every other taint on a node is left alone.
+            - name: TAINT_KEY
+              value: "multus.network.k8s.io/readiness"
             - name: NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-
             - name: HOSTNAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
-          
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 2
             periodSeconds: 5
-
           resources:
             limits:
               cpu: 200m
@@ -139,7 +143,7 @@ spec:
             requests:
               cpu: 50m
               memory: 64Mi
-
+      # The controller must be schedulable on nodes it has tainted itself and on system pools.
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
@@ -150,14 +154,16 @@ spec:
         - key: multus.network.k8s.io/readiness
           operator: Exists
           effect: NoSchedule
+        - key: CriticalAddonsOnly
+          operator: Exists
+          effect: NoSchedule
 
 ---
-# 5. Service
 apiVersion: v1
 kind: Service
 metadata:
   name: multus-controller-metrics
-  namespace: networking # <--- UPDATED
+  namespace: networking
   labels:
     app: multus-controller
 spec:

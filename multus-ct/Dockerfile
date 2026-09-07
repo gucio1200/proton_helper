@@ -1,18 +1,21 @@
-FROM rust:latest AS builder
+FROM rust:1.91-bookworm AS builder
 
-RUN apt update -y
-
-RUN apt install -y musl-dev openssl
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-unknown-linux-musl
 
 WORKDIR /app
 
-COPY . .
+# Build dependencies first so source edits do not rebuild them.
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo 'fn main() {}' > src/main.rs \
+    && cargo build --release --target x86_64-unknown-linux-musl \
+    && rm -rf src
 
-RUN rustup target add x86_64-unknown-linux-musl
+COPY src ./src
+RUN touch src/main.rs && cargo build --release --target x86_64-unknown-linux-musl
 
-RUN cargo build --release --target x86_64-unknown-linux-musl
-
-FROM alpine
+FROM alpine:3.22
 
 WORKDIR /app
 
