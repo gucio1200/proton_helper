@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,14 @@ pub struct Metrics {
     session_invalid: AtomicU64,
     session_persist_failed: AtomicU64,
     heartbeat: AtomicU64,
+    server: Mutex<Option<CurrentServer>>,
+}
+
+pub struct CurrentServer {
+    pub name: String,
+    pub country: String,
+    pub score: f64,
+    pub load: u64,
 }
 
 pub enum Regeneration {
@@ -81,6 +89,12 @@ impl Metrics {
     pub fn session_persisted(&self, ok: bool) {
         if !ok {
             self.session_persist_failed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn server(&self, current: CurrentServer) {
+        if let Ok(mut slot) = self.server.lock() {
+            *slot = Some(current);
         }
     }
 
@@ -156,8 +170,40 @@ impl Metrics {
             "Unix time of the last main loop heartbeat",
             load(&self.heartbeat) as f64,
         );
+        if let Ok(slot) = self.server.lock() {
+            if let Some(current) = slot.as_ref() {
+                let labels = format!(
+                    "server=\"{}\",country=\"{}\"",
+                    escape(&current.name),
+                    escape(&current.country)
+                );
+                let _ = writeln!(
+                    out,
+                    "# HELP protonvpn_server_info Proton server applied by the last regeneration\n# TYPE protonvpn_server_info gauge\nprotonvpn_server_info{{{labels}}} 1"
+                );
+                gauge(
+                    &mut out,
+                    "protonvpn_server_score",
+                    "Proton Score of the applied server when it was selected (lower is better)",
+                    current.score,
+                );
+                gauge(
+                    &mut out,
+                    "protonvpn_server_load",
+                    "Proton load percent of the applied server when it was selected",
+                    current.load as f64,
+                );
+            }
+        }
         out
     }
+}
+
+fn escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 fn gauge(out: &mut String, name: &str, help: &str, value: f64) {
@@ -231,6 +277,22 @@ mod tests {
         let rendered = metrics.render();
         assert!(rendered.contains("protonvpn_tunnel_up 1"));
         assert!(rendered.contains("protonvpn_tunnel_checks_total{result=\"ok\"} 1"));
+    }
+
+    #[test]
+    fn renders_current_server() {
+        let metrics = Metrics::default();
+        assert!(!metrics.render().contains("protonvpn_server_info"));
+        metrics.server(CurrentServer {
+            name: "DE#12".to_string(),
+            country: "DE".to_string(),
+            score: 1.25,
+            load: 37,
+        });
+        let rendered = metrics.render();
+        assert!(rendered.contains("protonvpn_server_info{server=\"DE#12\",country=\"DE\"} 1"));
+        assert!(rendered.contains("protonvpn_server_score 1.25"));
+        assert!(rendered.contains("protonvpn_server_load 37"));
     }
 
     #[test]

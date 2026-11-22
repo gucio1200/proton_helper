@@ -18,7 +18,7 @@ use anyhow::Result;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::metrics::{Metrics, Regeneration};
+use crate::metrics::{CurrentServer, Metrics, Regeneration};
 use crate::proton::Proton;
 use crate::session::{Origin, SessionStore};
 
@@ -83,9 +83,10 @@ fn run() -> Result<()> {
         last_refresh = Instant::now();
     }
 
+    let mut last_server: Option<String> = None;
     if config.regenerate_on_start {
         info!("REGENERATE_ON_START enabled, generating a fresh VPN config");
-        if regenerate(&mut proton, &config, &metrics) {
+        if regenerate(&mut proton, &config, &metrics, &mut last_server) {
             pause(&running, &metrics, SETTLE_AFTER_APPLY);
         }
     }
@@ -118,7 +119,7 @@ fn run() -> Result<()> {
 
         if failures >= config.check.failures {
             info!(failures, "tunnel down, regenerating VPN config");
-            regenerate(&mut proton, &config, &metrics);
+            regenerate(&mut proton, &config, &metrics, &mut last_server);
             failures = 0;
             pause(&running, &metrics, config.check.cooldown);
             continue;
@@ -139,19 +140,45 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn regenerate(proton: &mut Proton, config: &Config, metrics: &Metrics) -> bool {
-    match vpn::regenerate(proton, &config.servers, &config.mikrotik) {
-        Ok(vpn::Outcome::Applied { server, endpoint }) => {
+fn regenerate(
+    proton: &mut Proton,
+    config: &Config,
+    metrics: &Metrics,
+    last_server: &mut Option<String>,
+) -> bool {
+    match vpn::regenerate(
+        proton,
+        &config.servers,
+        &config.mikrotik,
+        last_server.as_deref(),
+    ) {
+        Ok(vpn::Outcome::Applied(applied)) => {
             metrics.regeneration(Regeneration::Applied);
-            info!(server = %server, endpoint = %endpoint, "VPN config regenerated");
+            info!(
+                server = %applied.server,
+                country = %applied.country,
+                endpoint = %applied.endpoint,
+                score = applied.score,
+                load = applied.load,
+                "VPN config regenerated"
+            );
+            *last_server = Some(applied.server.clone());
+            metrics.server(CurrentServer {
+                name: applied.server,
+                country: applied.country,
+                score: applied.score,
+                load: applied.load,
+            });
             true
         }
         Ok(vpn::Outcome::NoServer) => {
             metrics.regeneration(Regeneration::NoServer);
             warn!(
                 countries = ?config.servers.countries,
+                exclude_countries = ?config.servers.exclude_countries,
                 tier = config.servers.tier,
                 features = ?config.servers.features,
+                max_load = config.servers.max_load,
                 "no Proton server matches the filter"
             );
             false
