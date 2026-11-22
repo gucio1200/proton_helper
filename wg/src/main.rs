@@ -18,8 +18,6 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use sha2::{Digest, Sha512};
 
-const ACCOUNT_URL: &str = "https://account.protonvpn.com";
-
 struct CheckConfig {
     url: String,
     expect: String,
@@ -57,17 +55,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cooldown: Duration::from_secs(env_or::<u64>("REGEN_COOLDOWN_SECS", 600)?),
     };
     let regenerate_on_start = env_flag("REGENERATE_ON_START", false)?;
-    let configured_app_version = env::var("PROTON_APP_VERSION")
-        .ok()
-        .and_then(|v| normalize_app_version(&v));
+    let app_version = required_env("PROTON_APP_VERSION")?;
+
+    let client = proton_client(&auth_server, &auth_token, &session_id, &app_version)?;
 
     let check_client = Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
         .no_proxy()
         .build()?;
-
-    let web_client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
     // --- Ctrl+C handler ---
     let running = Arc::new(AtomicBool::new(true));
@@ -77,9 +73,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         r.store(false, Ordering::SeqCst);
     })?;
 
-    let regenerate_with = |app_version: &str| -> Result<bool, Box<dyn std::error::Error>> {
-        println!("[INFO] Proton API client version {}", app_version);
-        let client = proton_client(&auth_server, &auth_token, &session_id, app_version)?;
+    println!("[INFO] Proton API client version {}", app_version);
+
+    let regenerate = || {
         regenerate_vpn_flow(
             &client,
             &countries,
@@ -89,30 +85,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &mikrotik_user,
             &mikrotik_pass,
         )
-    };
-
-    let regenerate = || -> Result<bool, Box<dyn std::error::Error>> {
-        let configured = match &configured_app_version {
-            Some(version) => version,
-            None => {
-                let detected = detect_app_version(&web_client).map_err(|e| {
-                    format!("PROTON_APP_VERSION not set and detection failed: {}", e)
-                })?;
-                return regenerate_with(&detected);
-            }
-        };
-        match regenerate_with(configured) {
-            Err(e) if e.to_string().contains("Code 5003") => {
-                let detected = detect_app_version(&web_client)
-                    .map_err(|d| format!("{}; version detection failed: {}", e, d))?;
-                println!(
-                    "[WARN] PROTON_APP_VERSION {} rejected as outdated, retrying with {} (update it in 1Password)",
-                    configured, detected
-                );
-                regenerate_with(&detected)
-            }
-            result => result,
-        }
     };
 
     if regenerate_on_start {
@@ -273,44 +245,27 @@ fn proton_client(
         .build()?)
 }
 
-fn detect_app_version(client: &Client) -> Result<String, Box<dyn std::error::Error>> {
-    let html = client.get(format!("{}/", ACCOUNT_URL)).send()?.text()?;
-    let script = between(&html, "src=\"/assets/static/index.", "\"")
-        .ok_or("index script not found on the account page")?;
-    let js = client
-        .get(format!("{}/assets/static/index.{}", ACCOUNT_URL, script))
-        .send()?
-        .text()?;
-    let version = between(&js, "APP_VERSION:\"", "\"").ok_or("APP_VERSION not found")?;
-    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return Err(format!("unexpected APP_VERSION {:?}", version).into());
-    }
-    Ok(format!("web-account@{}", version))
-}
-
-fn normalize_app_version(value: &str) -> Option<String> {
+fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let value = env::var(name).unwrap_or_default();
     let value = value.trim();
     if value.is_empty() {
-        None
-    } else if value.contains('@') {
-        Some(value.to_string())
-    } else {
-        Some(format!("web-account@{}", value))
+        return Err(format!("{} is not set or empty", name).into());
     }
-}
-
-fn between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
-    let from = text.find(start)? + start.len();
-    let len = text[from..].find(end)?;
-    Some(&text[from..from + len])
+    Ok(value.to_string())
 }
 
 fn api_error(endpoint: &str, resp: &Value) -> String {
+    let hint = if resp["Code"].as_u64() == Some(5003) {
+        " - update x-pm-appversion in 1Password"
+    } else {
+        ""
+    };
     format!(
-        "Proton API {} returned no usable data (Code {}, {})",
+        "Proton API {} returned no usable data (Code {}, {}){}",
         endpoint,
         resp["Code"],
-        resp["Error"].as_str().unwrap_or("no error message")
+        resp["Error"].as_str().unwrap_or("no error message"),
+        hint
     )
 }
 
@@ -529,26 +484,14 @@ fn update_mikrotik_wg(
 
 #[cfg(test)]
 mod tests {
-    use super::{between, exit_ip, normalize_app_version, parse_flag};
+    use super::{api_error, exit_ip, parse_flag};
 
     #[test]
-    fn app_version_normalization() {
-        assert_eq!(
-            normalize_app_version("5.0.426.1").as_deref(),
-            Some("web-account@5.0.426.1")
-        );
-        assert_eq!(
-            normalize_app_version(" web-account@5.0.426.1 ").as_deref(),
-            Some("web-account@5.0.426.1")
-        );
-        assert_eq!(normalize_app_version("  "), None);
-    }
-
-    #[test]
-    fn between_finds_app_version() {
-        let js = "x={APP_VERSION:\"5.0.426.1\",APP_NAME:\"proton-account\"}";
-        assert_eq!(between(js, "APP_VERSION:\"", "\""), Some("5.0.426.1"));
-        assert_eq!(between(js, "MISSING:\"", "\""), None);
+    fn api_error_hints_outdated_app_version() {
+        let outdated = serde_json::json!({"Code": 5003, "Error": "This web page is out of date"});
+        assert!(api_error("logicals", &outdated).ends_with("update x-pm-appversion in 1Password"));
+        let auth = serde_json::json!({"Code": 401, "Error": "Invalid access token"});
+        assert!(!api_error("logicals", &auth).contains("x-pm-appversion"));
     }
 
     #[test]
