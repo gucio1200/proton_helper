@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::mapping::Mapper;
 use crate::qbittorrent::QBittorrent;
-use crate::report::{Reporter, Stage, REPEAT_AFTER};
+use crate::report::{Mapping, Reporter, Stage, REPEAT_AFTER};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -73,29 +73,33 @@ async fn refresh(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        qbittorrent.wait_ready(reporter).await;
-        match cycle(mapper, qbittorrent, reporter).await {
+        let mapping = match mapper.refresh().await {
+            Ok(mapping) => mapping,
+            Err(e) => {
+                reporter.failed(Stage::NatPmp, &e, Instant::now());
+                continue;
+            }
+        };
+        reporter.mapped(mapping);
+        reporter.recovered(Stage::NatPmp, Instant::now());
+
+        if let Err(e) = qbittorrent.version().await {
+            reporter.qbittorrent_unreachable(&e, Instant::now());
+            continue;
+        }
+        reporter.qbittorrent_reachable(Instant::now());
+
+        match sync(qbittorrent, reporter, mapping).await {
             Ok(()) => reporter.succeeded(Instant::now()),
-            Err((stage, e)) => reporter.failed(stage, &e, Instant::now()),
+            Err(e) => reporter.failed(Stage::QBittorrent, &e, Instant::now()),
         }
     }
 }
 
-async fn cycle(
-    mapper: &mut Mapper,
-    qbittorrent: &QBittorrent,
-    reporter: &mut Reporter,
-) -> Result<(), (Stage, anyhow::Error)> {
-    let mapping = mapper.refresh().await.map_err(|e| (Stage::NatPmp, e))?;
-    reporter.mapped(mapping);
-
-    let qbittorrent_error = |e| (Stage::QBittorrent, e);
-    let current = qbittorrent.listen_port().await.map_err(qbittorrent_error)?;
+async fn sync(qbittorrent: &QBittorrent, reporter: &Reporter, mapping: Mapping) -> Result<()> {
+    let current = qbittorrent.listen_port().await?;
     if current != mapping.tcp {
-        qbittorrent
-            .set_listen_port(mapping.tcp)
-            .await
-            .map_err(qbittorrent_error)?;
+        qbittorrent.set_listen_port(mapping.tcp).await?;
     }
     reporter.listen_port(current, mapping.tcp);
     Ok(())

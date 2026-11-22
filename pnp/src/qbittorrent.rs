@@ -1,13 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::{Client, RequestBuilder, Response};
 use serde_json::Value;
-use tokio::time::sleep;
 
-use crate::report::Reporter;
-
-const READY_POLL: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const BODY_LIMIT: usize = 200;
@@ -30,20 +26,7 @@ impl QBittorrent {
         })
     }
 
-    pub async fn wait_ready(&self, reporter: &mut Reporter) {
-        loop {
-            match self.version().await {
-                Ok(()) => {
-                    reporter.qbittorrent_reachable(Instant::now());
-                    return;
-                }
-                Err(e) => reporter.qbittorrent_unreachable(&e, Instant::now()),
-            }
-            sleep(READY_POLL).await;
-        }
-    }
-
-    async fn version(&self) -> Result<()> {
+    pub async fn version(&self) -> Result<()> {
         send(self.client.get(self.url("version")))
             .await
             .map(drop)
