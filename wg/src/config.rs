@@ -45,9 +45,17 @@ pub struct MikrotikConfig {
 #[derive(Debug, Clone)]
 pub struct ServerFilter {
     pub countries: Vec<String>,
+    pub exclude_countries: Vec<String>,
     pub tier: u64,
     pub features: Vec<String>,
+    pub max_load: u64,
 }
+
+pub const EUROPE: &[&str] = &[
+    "AD", "AL", "AT", "BA", "BE", "BG", "BY", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR",
+    "GB", "UK", "GR", "HR", "HU", "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MC", "MD", "ME", "MK",
+    "MT", "NL", "NO", "PL", "PT", "RO", "RS", "SE", "SI", "SK", "SM", "UA", "VA", "XK",
+];
 
 #[derive(Debug, Clone)]
 pub struct CheckConfig {
@@ -119,9 +127,11 @@ impl Config {
                 timeout: secs("MIKROTIK_TIMEOUT_SECS", 30)?,
             },
             servers: ServerFilter {
-                countries: list("COUNTRIES", "RO"),
+                countries: countries("COUNTRIES", "RO"),
+                exclude_countries: countries("EXCLUDE_COUNTRIES", ""),
                 tier: parsed::<u64>("TIER", 2)?,
-                features: list("FEATURES", "P2P"),
+                features: list("FEATURES", "P2P,-SecureCore"),
+                max_load: parsed::<u64>("MAX_LOAD", 80)?.min(100),
             },
             check,
             regenerate_on_start: flag("REGENERATE_ON_START", false)?,
@@ -175,6 +185,25 @@ fn list(name: &str, default: &str) -> Vec<String> {
         .collect()
 }
 
+fn countries(name: &str, default: &str) -> Vec<String> {
+    expand_countries(&list(name, default))
+}
+
+pub fn expand_countries(items: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        let item = item.to_ascii_uppercase();
+        if item == "EUROPE" {
+            out.extend(EUROPE.iter().map(|code| code.to_string()));
+        } else {
+            out.push(item);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn parse_flag(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -217,6 +246,17 @@ mod tests {
         assert!(!printed.contains("refresh-value"));
         assert!(!printed.contains("session-value"));
         assert!(printed.contains("<redacted>"));
+    }
+
+    #[test]
+    fn europe_alias_expands() {
+        let codes = expand_countries(&["europe".to_string(), "ro".to_string(), "TR".to_string()]);
+        assert!(codes.contains(&"PL".to_string()));
+        assert!(codes.contains(&"DE".to_string()));
+        assert!(codes.contains(&"GB".to_string()) && codes.contains(&"UK".to_string()));
+        assert!(codes.contains(&"TR".to_string()));
+        assert_eq!(codes.iter().filter(|c| *c == "RO").count(), 1);
+        assert!(expand_countries(&[]).is_empty());
     }
 
     #[test]
