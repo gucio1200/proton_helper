@@ -1,517 +1,177 @@
-use std::env;
-use std::io::Read;
-use std::net::TcpStream;
-use std::str::FromStr;
+mod check;
+mod config;
+mod kube;
+mod logging;
+mod metrics;
+mod mikrotik;
+mod proton;
+mod session;
+mod vpn;
+
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rand::seq::SliceRandom;
-use ssh2::Session;
+use anyhow::Result;
+use tracing::{error, info, warn};
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
-use chrono::Local;
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue};
-use serde_json::Value;
-use sha2::{Digest, Sha512};
+use crate::config::Config;
+use crate::metrics::{Metrics, Regeneration};
+use crate::proton::Proton;
+use crate::session::{Origin, SessionStore};
 
-struct CheckConfig {
-    url: String,
-    expect: String,
-    interval: Duration,
-    failures: u32,
-    cooldown: Duration,
+const HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(300);
+const SETTLE_AFTER_APPLY: Duration = Duration::from_secs(15);
+
+fn main() -> ExitCode {
+    let _ = dotenvy::dotenv();
+    logging::init();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!(error = %format!("{e:#}"), "fatal error");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+fn run() -> Result<()> {
+    let config = Config::from_env()?;
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        app_version = %config.app_version,
+        check_url = %config.check.url,
+        check_interval_secs = config.check.interval.as_secs(),
+        check_failures = config.check.failures,
+        regen_cooldown_secs = config.check.cooldown.as_secs(),
+        regenerate_on_start = config.regenerate_on_start,
+        wg_interface = %config.mikrotik.wg_interface,
+        session_secret = config.session_secret.as_deref().unwrap_or("disabled"),
+        "starting"
+    );
 
-    // --- Environment setup ---
-    let auth_server = env::var("AUTH_SERVER")?;
-    let auth_token = env::var("AUTH_TOKEN")?;
-    let session_id = env::var("SESSION_ID")?;
+    let metrics = Arc::new(Metrics::default());
+    metrics.heartbeat();
+    metrics::serve(&config.http_addr, metrics.clone(), HEARTBEAT_MAX_AGE)?;
 
-    let mikrotik_host = env::var("MIKROTIK_HOST")?;
-    let mikrotik_user = env::var("MIKROTIK_USER")?;
-    let mikrotik_pass = env::var("MIKROTIK_PASS")?;
-
-    let countries_str = env::var("COUNTRIES").unwrap_or_else(|_| "RO".to_string());
-    let countries: Vec<&str> = countries_str.split(',').collect();
-
-    let tier: u32 = env::var("TIER")
-        .unwrap_or_else(|_| "2".to_string())
-        .parse()?;
-    let features_str = env::var("FEATURES").unwrap_or_else(|_| "P2P".to_string());
-    let features: Vec<&str> = features_str.split(',').collect();
-
-    let check = CheckConfig {
-        url: env::var("CHECK_URL").unwrap_or_else(|_| "https://1.1.1.1/cdn-cgi/trace".to_string()),
-        expect: env::var("CHECK_EXPECT").unwrap_or_else(|_| "ip=".to_string()),
-        interval: Duration::from_secs(env_or::<u64>("CHECK_INTERVAL_SECS", 30)?),
-        failures: env_or::<u32>("CHECK_FAILURES", 3)?.max(1),
-        cooldown: Duration::from_secs(env_or::<u64>("REGEN_COOLDOWN_SECS", 600)?),
-    };
-    let regenerate_on_start = env_flag("REGENERATE_ON_START", false)?;
-    let app_version = required_env("PROTON_APP_VERSION")?;
-
-    let client = proton_client(&auth_server, &auth_token, &session_id, &app_version)?;
-
-    let check_client = Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .no_proxy()
-        .build()?;
-
-    // --- Ctrl+C handler ---
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        println!("\n[INFO] Termination signal received, exiting...");
-        r.store(false, Ordering::SeqCst);
-    })?;
+    {
+        let running = running.clone();
+        ctrlc::set_handler(move || running.store(false, Ordering::SeqCst))?;
+    }
 
-    println!("[INFO] Proton API client version {}", app_version);
+    let store = SessionStore::new(config.session_secret.clone(), &config.seed);
+    let persistent = store.persistent();
+    let (mut proton, origin) = Proton::new(&config, store, metrics.clone())?;
+    if !proton.can_refresh() {
+        warn!("REFRESH_TOKEN is not set, the Proton session cannot be renewed automatically");
+    }
+    let check = check::TunnelCheck::new(
+        &config.check.url,
+        &config.check.expect,
+        config.check.timeout,
+    )?;
 
-    let regenerate = || {
-        regenerate_vpn_flow(
-            &client,
-            &countries,
-            tier,
-            &features,
-            &mikrotik_host,
-            &mikrotik_user,
-            &mikrotik_pass,
-        )
-    };
+    let mut last_refresh = Instant::now();
+    if origin == Origin::Seed && persistent && proton.can_refresh() {
+        info!("validating the Proton session from 1Password");
+        if let Err(e) = proton.refresh() {
+            warn!(error = %format!("{e:#}"), "Proton session refresh at startup failed");
+        }
+        last_refresh = Instant::now();
+    }
 
-    if regenerate_on_start {
-        println!("[INFO] REGENERATE_ON_START enabled → generating a fresh VPN config");
-        match regenerate() {
-            Ok(true) => sleep_while_running(&running, Duration::from_secs(15)),
-            Ok(false) => {}
-            Err(e) => println!("[ERROR] VPN regeneration failed: {}", e),
+    if config.regenerate_on_start {
+        info!("REGENERATE_ON_START enabled, generating a fresh VPN config");
+        if regenerate(&mut proton, &config, &metrics) {
+            pause(&running, &metrics, SETTLE_AFTER_APPLY);
         }
     }
 
-    println!(
-        "[INFO] Tunnel check: GET {} every {}s, regenerate after {} failures, cooldown {}s",
-        check.url,
-        check.interval.as_secs(),
-        check.failures,
-        check.cooldown.as_secs()
-    );
-
-    // --- Monitoring loop ---
     let mut failures = 0u32;
     let mut healthy: Option<bool> = None;
     while running.load(Ordering::SeqCst) {
-        match tunnel_check(&check_client, &check.url, &check.expect) {
+        metrics.heartbeat();
+        match check.run() {
             Ok(exit_ip) => {
+                metrics.check(true);
                 if healthy != Some(true) {
-                    println!("[INFO] Tunnel OK, exit IP {}", exit_ip);
+                    info!(exit_ip = %exit_ip, "tunnel OK");
                 }
                 healthy = Some(true);
                 failures = 0;
             }
             Err(e) => {
+                metrics.check(false);
                 failures += 1;
                 healthy = Some(false);
-                println!(
-                    "[WARN] Tunnel check failed ({}/{}): {}",
-                    failures, check.failures, e
+                warn!(
+                    failures,
+                    threshold = config.check.failures,
+                    error = %format!("{e:#}"),
+                    "tunnel check failed"
                 );
             }
         }
 
-        if failures < check.failures {
-            sleep_while_running(&running, check.interval);
+        if failures >= config.check.failures {
+            info!(failures, "tunnel down, regenerating VPN config");
+            regenerate(&mut proton, &config, &metrics);
+            failures = 0;
+            pause(&running, &metrics, config.check.cooldown);
             continue;
         }
 
-        println!(
-            "[INFO] {} consecutive failures detected → regenerating VPN config",
-            failures
-        );
-        if let Err(e) = regenerate() {
-            println!("[ERROR] VPN regeneration failed: {}", e);
+        if proton.can_refresh() && last_refresh.elapsed() >= config.session_refresh_interval {
+            info!("scheduled Proton session refresh");
+            if let Err(e) = proton.refresh() {
+                warn!(error = %format!("{e:#}"), "scheduled Proton session refresh failed");
+            }
+            last_refresh = Instant::now();
         }
-        failures = 0;
-        sleep_while_running(&running, check.cooldown);
+
+        pause(&running, &metrics, config.check.interval);
     }
 
-    println!("[INFO] Program terminated gracefully.");
+    info!("stopping");
     Ok(())
 }
 
-fn env_or<T>(name: &str, default: T) -> Result<T, Box<dyn std::error::Error>>
-where
-    T: FromStr,
-    T::Err: std::fmt::Display,
-{
-    match env::var(name) {
-        Ok(value) => value
-            .trim()
-            .parse::<T>()
-            .map_err(|e| format!("invalid {}={}: {}", name, value, e).into()),
-        Err(_) => Ok(default),
+fn regenerate(proton: &mut Proton, config: &Config, metrics: &Metrics) -> bool {
+    match vpn::regenerate(proton, &config.servers, &config.mikrotik) {
+        Ok(vpn::Outcome::Applied { server, endpoint }) => {
+            metrics.regeneration(Regeneration::Applied);
+            info!(server = %server, endpoint = %endpoint, "VPN config regenerated");
+            true
+        }
+        Ok(vpn::Outcome::NoServer) => {
+            metrics.regeneration(Regeneration::NoServer);
+            warn!(
+                countries = ?config.servers.countries,
+                tier = config.servers.tier,
+                features = ?config.servers.features,
+                "no Proton server matches the filter"
+            );
+            false
+        }
+        Err(e) => {
+            metrics.regeneration(Regeneration::Failed);
+            error!(error = %format!("{e:#}"), "VPN regeneration failed");
+            false
+        }
     }
 }
 
-fn env_flag(name: &str, default: bool) -> Result<bool, Box<dyn std::error::Error>> {
-    let value = match env::var(name) {
-        Ok(value) => value,
-        Err(_) => return Ok(default),
-    };
-    match parse_flag(&value) {
-        Some(flag) => Ok(flag),
-        None => Err(format!("invalid {}={}: expected true or false", name, value).into()),
-    }
-}
-
-fn parse_flag(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" | "" => Some(false),
-        _ => None,
-    }
-}
-
-fn sleep_while_running(running: &AtomicBool, total: Duration) {
+fn pause(running: &AtomicBool, metrics: &Metrics, total: Duration) {
     let deadline = Instant::now() + total;
     while running.load(Ordering::SeqCst) {
+        metrics.heartbeat();
         let now = Instant::now();
         if now >= deadline {
             break;
         }
         thread::sleep((deadline - now).min(Duration::from_secs(1)));
-    }
-}
-
-fn tunnel_check(client: &Client, url: &str, expect: &str) -> Result<String, String> {
-    let resp = client.get(url).send().map_err(describe_request_error)?;
-    let status = resp.status();
-    let body = resp.text().map_err(describe_request_error)?;
-    if !status.is_success() {
-        return Err(format!("HTTP {}", status));
-    }
-    if !body.contains(expect) {
-        return Err(format!("response does not contain {:?}", expect));
-    }
-    Ok(exit_ip(&body).unwrap_or("unknown").to_string())
-}
-
-fn describe_request_error(e: reqwest::Error) -> String {
-    if e.is_timeout() {
-        "timeout".to_string()
-    } else if e.is_connect() {
-        format!("connect error: {}", e)
-    } else {
-        e.to_string()
-    }
-}
-
-fn exit_ip(body: &str) -> Option<&str> {
-    body.lines()
-        .find_map(|line| line.strip_prefix("ip="))
-        .map(str::trim)
-}
-
-fn proton_client(
-    uid: &str,
-    token: &str,
-    session_id: &str,
-    app_version: &str,
-) -> Result<Client, Box<dyn std::error::Error>> {
-    let mut headers = HeaderMap::new();
-    headers.insert("x-pm-appversion", HeaderValue::from_str(app_version)?);
-    headers.insert("x-pm-uid", HeaderValue::from_str(uid)?);
-    headers.insert(
-        "Accept",
-        HeaderValue::from_static("application/vnd.protonmail.v1+json"),
-    );
-    headers.insert(
-        "Cookie",
-        HeaderValue::from_str(&format!(
-            "AUTH-{}={}; Session-Id={}",
-            uid, token, session_id
-        ))?,
-    );
-    Ok(Client::builder()
-        .default_headers(headers)
-        .timeout(Duration::from_secs(30))
-        .build()?)
-}
-
-fn required_env(name: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let value = env::var(name).unwrap_or_default();
-    let value = value.trim();
-    if value.is_empty() {
-        return Err(format!("{} is not set or empty", name).into());
-    }
-    Ok(value.to_string())
-}
-
-fn api_error(endpoint: &str, resp: &Value) -> String {
-    let hint = if resp["Code"].as_u64() == Some(5003) {
-        " - update x-pm-appversion in 1Password"
-    } else {
-        ""
-    };
-    format!(
-        "Proton API {} returned no usable data (Code {}, {}){}",
-        endpoint,
-        resp["Code"],
-        resp["Error"].as_str().unwrap_or("no error message"),
-        hint
-    )
-}
-
-/// --- VPN regeneration flow ---
-fn regenerate_vpn_flow(
-    client: &Client,
-    countries: &[&str],
-    tier: u32,
-    features: &[&str],
-    mikrotik_host: &str,
-    mikrotik_user: &str,
-    mikrotik_pass: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // Fetch ProtonVPN servers
-    let resp: Value = client
-        .get("https://account.protonvpn.com/api/vpn/v1/logicals")
-        .send()?
-        .json()?;
-    let mut servers: Vec<Value> = match resp["LogicalServers"].as_array() {
-        Some(list) => list.to_owned(),
-        None => return Err(api_error("logicals", &resp).into()),
-    };
-
-    // Filter by country/tier/features/Status=1
-    servers.retain(|s| {
-        let entry_country = s["EntryCountry"].as_str().unwrap_or("");
-        let exit_country = s["ExitCountry"].as_str().unwrap_or("");
-        let server_tier = s["Tier"].as_u64().unwrap_or(0) as u32;
-        let status = s["Status"].as_u64().unwrap_or(0);
-
-        let feat_flags = [
-            if s["Features"].as_u64().unwrap_or(0) & 1 == 1 {
-                "SecureCore"
-            } else {
-                "-SecureCore"
-            },
-            if s["Features"].as_u64().unwrap_or(0) & 2 == 2 {
-                "TOR"
-            } else {
-                "-TOR"
-            },
-            if s["Features"].as_u64().unwrap_or(0) & 4 == 4 {
-                "P2P"
-            } else {
-                "-P2P"
-            },
-            if s["Features"].as_u64().unwrap_or(0) & 8 == 8 {
-                "XOR"
-            } else {
-                "-XOR"
-            },
-            if s["Features"].as_u64().unwrap_or(0) & 16 == 16 {
-                "IPv6"
-            } else {
-                "-IPv6"
-            },
-        ];
-
-        status == 1
-            && (!countries.contains(&entry_country) && !countries.contains(&exit_country)) == false
-            && server_tier == tier
-            && !features.iter().any(|f| !feat_flags.contains(f))
-    });
-
-    if servers.is_empty() {
-        println!("[WARN] No servers found matching the given criteria.");
-        return Ok(false);
-    }
-
-    // Shuffle and select one
-    let mut rng = rand::rng();
-    servers.shuffle(&mut rng);
-    let server = &servers[0];
-
-    println!(
-        "[INFO] Selected server: {}",
-        server["Name"].as_str().unwrap_or("")
-    );
-
-    let keys = get_keys_from_protonvpn(client)?;
-    let reg = register_config(client, server, &keys)?;
-    let x25519_priv = get_x25519_priv(&keys[2])?;
-
-    let peer_public = reg["Features"]["peerPublicKey"].as_str().unwrap_or("");
-    let endpoint_ip = reg["Features"]["peerIp"].as_str().unwrap_or("");
-    if peer_public.is_empty() || endpoint_ip.is_empty() {
-        return Err(api_error("certificate", &reg).into());
-    }
-    println!("[INFO] New endpoint: {}:51820", endpoint_ip);
-
-    // Update MikroTik
-    update_mikrotik_wg(
-        mikrotik_host,
-        mikrotik_user,
-        mikrotik_pass,
-        &x25519_priv,
-        peer_public,
-        endpoint_ip,
-    )?;
-
-    Ok(true)
-}
-
-// ------------------- ProtonVPN + SSH helpers -------------------
-
-fn get_keys_from_protonvpn(client: &Client) -> Result<[String; 3], Box<dyn std::error::Error>> {
-    let resp: Value = client
-        .get("https://account.protonvpn.com/api/vpn/v1/certificate/key/EC")
-        .send()?
-        .json()?;
-    let priv_key_full = resp["PrivateKey"].as_str().unwrap_or("").to_string();
-    let pub_key_full = resp["PublicKey"].as_str().unwrap_or("").to_string();
-    let priv_key_stripped = priv_key_full.lines().nth(1).unwrap_or("").to_string();
-    let pub_key_stripped = pub_key_full.lines().nth(1).unwrap_or("").to_string();
-    if priv_key_stripped.is_empty() || pub_key_stripped.is_empty() {
-        return Err(api_error("certificate/key/EC", &resp).into());
-    }
-    Ok([priv_key_full, pub_key_stripped, priv_key_stripped])
-}
-
-fn get_x25519_priv(priv_key: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let decoded = STANDARD.decode(priv_key)?;
-    if decoded.len() < 32 {
-        return Err("Proton private key is shorter than 32 bytes".into());
-    }
-    let hash = Sha512::digest(&decoded[decoded.len() - 32..]);
-    let mut h = hash[..32].to_vec();
-    h[0] &= 0xf8;
-    h[31] &= 0x7f;
-    h[31] |= 0x40;
-    Ok(STANDARD.encode(&h))
-}
-
-fn register_config(
-    client: &Client,
-    server: &Value,
-    priv_keys: &[String; 3],
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let device_name = format!(
-        "{}-{}",
-        Local::now().format("%d/%m"),
-        server["Name"].as_str().unwrap_or("")
-    );
-    let body = serde_json::json!({
-        "ClientPublicKey": priv_keys[1],
-        "Mode": "persistent",
-        "DeviceName": device_name,
-        "Features": {
-            "peerName": server["Name"].as_str().unwrap_or(""),
-            "peerIp": server["Servers"][0]["EntryIP"].as_str().unwrap_or(""),
-            "peerPublicKey": server["Servers"][0]["X25519PublicKey"].as_str().unwrap_or(""),
-            "platform": "Windows",
-            "SplitTCP": true,
-            "PortForwarding": true,
-            "RandomNAT": true,
-            "NetShieldLevel": 0
-        }
-    });
-
-    let resp: Value = client
-        .post("https://account.protonvpn.com/api/vpn/v1/certificate")
-        .json(&body)
-        .send()?
-        .json()?;
-    Ok(resp)
-}
-
-fn update_mikrotik_wg(
-    host: &str,
-    user: &str,
-    pass: &str,
-    wg_private: &str,
-    peer_public: &str,
-    endpoint_ip: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("[SSH] Connecting to MikroTik at {}", host);
-    let tcp = TcpStream::connect(format!("{}:22", host))?;
-    let mut sess = Session::new()?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake()?;
-    sess.userauth_password(user, pass)?;
-    if !sess.authenticated() {
-        return Err("SSH authentication failed".into());
-    }
-
-    let commands = vec![
-        format!(
-            "/interface/wireguard/set wg1 private-key=\"{}\"",
-            wg_private
-        ),
-        format!(
-            "/interface/wireguard/peers/set numbers=0 public-key=\"{}\"",
-            peer_public
-        ),
-        format!(
-            "/interface/wireguard/peers/set numbers=0 endpoint-address=\"{}\"",
-            endpoint_ip
-        ),
-    ];
-
-    for cmd in commands {
-        let mut channel = sess.channel_session()?;
-        println!(
-            "[SSH] {}",
-            cmd.split(" private-key=").next().unwrap_or(&cmd)
-        );
-        channel.exec(&cmd)?;
-        let mut s = String::new();
-        channel.read_to_string(&mut s)?;
-        println!("[SSH Output]:\n{}", s);
-        channel.wait_close()?;
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{api_error, exit_ip, parse_flag};
-
-    #[test]
-    fn api_error_hints_outdated_app_version() {
-        let outdated = serde_json::json!({"Code": 5003, "Error": "This web page is out of date"});
-        assert!(api_error("logicals", &outdated).ends_with("update x-pm-appversion in 1Password"));
-        let auth = serde_json::json!({"Code": 401, "Error": "Invalid access token"});
-        assert!(!api_error("logicals", &auth).contains("x-pm-appversion"));
-    }
-
-    #[test]
-    fn flag_values() {
-        assert_eq!(parse_flag("true"), Some(true));
-        assert_eq!(parse_flag(" TRUE "), Some(true));
-        assert_eq!(parse_flag("1"), Some(true));
-        assert_eq!(parse_flag("false"), Some(false));
-        assert_eq!(parse_flag(""), Some(false));
-        assert_eq!(parse_flag("enabled"), None);
-    }
-
-    #[test]
-    fn exit_ip_from_cloudflare_trace() {
-        let body = "fl=12f1\nh=1.1.1.1\nip=203.0.113.7\nts=1795375164.1\nwarp=off\n";
-        assert_eq!(exit_ip(body), Some("203.0.113.7"));
-    }
-
-    #[test]
-    fn exit_ip_missing() {
-        assert_eq!(exit_ip("<html>blocked</html>"), None);
     }
 }
