@@ -1,23 +1,20 @@
-FROM rust:latest AS builder
+FROM rust:1.100.0-alpine3.24 AS builder
 
-RUN apt update -y
-
-RUN apt install -y musl-dev openssl
+RUN apk add --no-cache musl-dev perl make linux-headers
 
 WORKDIR /app
 
-COPY . .
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
 
-RUN rustup target add x86_64-unknown-linux-musl
+RUN cargo test --release --locked && cargo build --release --locked
 
-RUN cargo build --release --target x86_64-unknown-linux-musl
+FROM alpine:3.24.4
 
-FROM alpine
+RUN apk add --no-cache ca-certificates
 
-WORKDIR /app
+COPY --from=builder /app/target/release/pnp /app/pnp
 
-COPY --from=builder --chown=1000:1000 /app/target/x86_64-unknown-linux-musl/release/pnp /app/pnp
-
-USER 1000
+USER 1000:1000
 
 ENTRYPOINT ["/app/pnp"]
