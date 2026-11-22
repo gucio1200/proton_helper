@@ -124,6 +124,16 @@ impl Reporter {
         }
     }
 
+    pub fn recovered(&mut self, stage: Stage, now: Instant) {
+        if self
+            .failure
+            .as_ref()
+            .is_some_and(|streak| streak.key.0 == stage)
+        {
+            self.succeeded(now);
+        }
+    }
+
     pub fn succeeded(&mut self, now: Instant) {
         if let Some(streak) = self.failure.take() {
             info!(
@@ -306,6 +316,35 @@ mod tests {
         assert_eq!(lines[0]["message"], "port refresh recovered");
         assert_eq!(lines[0]["failures"], 3);
         assert_eq!(lines[0]["downtime_secs"], 90);
+    }
+
+    #[test]
+    fn mapping_recovery_is_logged_without_waiting_for_qbittorrent() {
+        let mut reporter = Reporter::new(REPEAT_AFTER);
+        let start = Instant::now();
+        let error = anyhow!("network failure");
+        reporter.failed(Stage::NatPmp, &error, start);
+        let lines = capture(|| {
+            reporter.recovered(Stage::QBittorrent, at(start, 30));
+            reporter.recovered(Stage::NatPmp, at(start, 60));
+            reporter.recovered(Stage::NatPmp, at(start, 90));
+        });
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["message"], "port refresh recovered");
+        assert_eq!(lines[0]["downtime_secs"], 60);
+    }
+
+    #[test]
+    fn qbittorrent_failure_is_not_cleared_by_mapping_success() {
+        let mut reporter = Reporter::new(REPEAT_AFTER);
+        let start = Instant::now();
+        let error = anyhow!("HTTP 403 Forbidden");
+        reporter.failed(Stage::QBittorrent, &error, start);
+        let lines = capture(|| reporter.recovered(Stage::NatPmp, at(start, 30)));
+        assert!(lines.is_empty(), "{lines:?}");
+        let lines = capture(|| reporter.succeeded(at(start, 60)));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["message"], "port refresh recovered");
     }
 
     #[test]
