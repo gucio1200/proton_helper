@@ -17,8 +17,6 @@ jobs:
           - wg
           - pnp
           - kodi_ask
-          - az
-          - aksver_mock
           - multus-ct
     steps:
       # Checkout repository
