@@ -15,6 +15,12 @@ use crate::metrics::{Metrics, Refresh};
 use crate::session::{Origin, Session, SessionStore};
 
 const MAX_ATTEMPTS: u32 = 4;
+const CONFIRM_PATH: &str = "/api/core/v4/users";
+
+pub enum Confirmation {
+    Confirmed,
+    Expired,
+}
 
 pub struct Proton {
     http: Client,
@@ -23,6 +29,8 @@ pub struct Proton {
     session: Session,
     store: SessionStore,
     metrics: Arc<Metrics>,
+    confirmed: bool,
+    invalid: bool,
 }
 
 impl Proton {
@@ -37,6 +45,7 @@ impl Proton {
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("protonvpn-wg/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        metrics.session_confirmed(false);
         Ok((
             Self {
                 http,
@@ -45,6 +54,8 @@ impl Proton {
                 session,
                 store,
                 metrics,
+                confirmed: false,
+                invalid: false,
             },
             origin,
         ))
@@ -52,6 +63,44 @@ impl Proton {
 
     pub fn can_refresh(&self) -> bool {
         self.session.refresh_token.is_some()
+    }
+
+    pub fn confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    pub fn invalid(&self) -> bool {
+        self.invalid
+    }
+
+    fn set_confirmed(&mut self, confirmed: bool) {
+        self.confirmed = confirmed;
+        self.metrics.session_confirmed(confirmed);
+    }
+
+    pub fn confirm(&mut self) -> Result<Confirmation> {
+        if self.confirmed {
+            return Ok(Confirmation::Confirmed);
+        }
+        let resp = self
+            .http
+            .get(format!("{}{CONFIRM_PATH}", self.base))
+            .headers(self.headers(&self.api_cookie())?)
+            .send()
+            .context("Proton session confirmation request failed")?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Ok(Confirmation::Expired);
+        }
+        let body: Value = resp.json().unwrap_or(Value::Null);
+        if status.is_success() && body["Code"].as_u64() == Some(1000) {
+            self.set_confirmed(true);
+            return Ok(Confirmation::Confirmed);
+        }
+        bail!(
+            "Proton session confirmation failed (HTTP {status}, {})",
+            api_message(&body)
+        );
     }
 
     pub fn get(&mut self, path: &str) -> Result<Value> {
@@ -160,6 +209,7 @@ impl Proton {
         match status.as_u16() {
             200..=299 => {}
             400 | 401 | 422 => {
+                self.invalid = true;
                 self.metrics.refresh(Refresh::Invalid);
                 bail!(
                     "Proton rejected the session refresh (HTTP {status}, {}); log in again and update AUTH_SERVER, AUTH_TOKEN, REFRESH_TOKEN and SESSION_ID in 1Password",
@@ -196,7 +246,8 @@ impl Proton {
             self.session.session_id = Secret::new(session_id.clone());
         }
         self.metrics.refresh(Refresh::Ok);
-        info!("Proton session refreshed");
+        self.invalid = false;
+        self.set_confirmed(false);
 
         match self.store.save(&self.session) {
             Ok(()) => self.metrics.session_persisted(true),
@@ -205,6 +256,19 @@ impl Proton {
                 error!(error = %format!("{e:#}"), "cannot store the rotated Proton session, it is lost on restart");
             }
         }
+
+        let confirmed = match self.confirm() {
+            Ok(Confirmation::Confirmed) => true,
+            Ok(Confirmation::Expired) => {
+                warn!("Proton rejected the new access token right after the refresh");
+                false
+            }
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "cannot confirm the refreshed Proton session yet, retrying");
+                false
+            }
+        };
+        info!(confirmed, "Proton session refreshed");
         Ok(())
     }
 }
@@ -279,7 +343,111 @@ pub fn api_error(path: &str, status: StatusCode, body: &Value, can_refresh: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProtonSeed;
     use reqwest::header::HeaderValue;
+    use std::sync::mpsc;
+
+    fn test_proton(base: String) -> Proton {
+        let seed = ProtonSeed {
+            uid: "uid".to_string(),
+            access_token: Secret::new("old-access"),
+            refresh_token: Some(Secret::new("old-refresh")),
+            session_id: Secret::new("sid"),
+        };
+        let store = SessionStore::new(None, &seed);
+        let (session, _) = store.load(&seed);
+        Proton {
+            http: Client::new(),
+            base,
+            app_version: "test@1.0.0".to_string(),
+            session,
+            store,
+            metrics: Arc::new(Metrics::default()),
+            confirmed: false,
+            invalid: false,
+        }
+    }
+
+    fn mock_api(
+        confirm_status: u16,
+    ) -> (
+        String,
+        mpsc::Receiver<(String, String)>,
+        thread::JoinHandle<()>,
+    ) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("mock server");
+        let addr = server.server_addr().to_ip().expect("ip listener");
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let request = server.recv().expect("request");
+                let path = request.url().to_string();
+                let cookie = request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Cookie"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default();
+                tx.send((path.clone(), cookie)).expect("record request");
+                let response = if path == "/api/auth/refresh" {
+                    tiny_http::Response::from_string(r#"{"Code":1000}"#)
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Set-Cookie"[..],
+                                &b"AUTH-uid=new-access; Path=/api/"[..],
+                            )
+                            .expect("header"),
+                        )
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Set-Cookie"[..],
+                                &b"REFRESH-uid=new-refresh; Path=/api/auth/refresh"[..],
+                            )
+                            .expect("header"),
+                        )
+                } else {
+                    tiny_http::Response::from_string(r#"{"Code":1000}"#)
+                        .with_status_code(confirm_status)
+                };
+                request.respond(response).expect("respond");
+            }
+        });
+        (format!("http://{addr}"), rx, handle)
+    }
+
+    #[test]
+    fn refresh_confirms_the_new_tokens() {
+        let (base, requests, server) = mock_api(200);
+        let mut proton = test_proton(base);
+        proton.refresh().expect("refresh");
+        server.join().expect("mock server thread");
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "/api/auth/refresh");
+        assert!(requests[0].1.contains("REFRESH-uid=old-refresh"));
+        assert_eq!(requests[1].0, CONFIRM_PATH);
+        assert!(requests[1].1.contains("AUTH-uid=new-access"));
+        assert!(proton.confirmed());
+        assert!(!proton.invalid());
+        assert_eq!(
+            proton.session.refresh_token.as_ref().map(Secret::expose),
+            Some("new-refresh")
+        );
+    }
+
+    #[test]
+    fn failed_confirmation_leaves_the_session_unconfirmed() {
+        let (base, _requests, server) = mock_api(401);
+        let mut proton = test_proton(base);
+        proton.refresh().expect("refresh");
+        server.join().expect("mock server thread");
+        assert!(!proton.confirmed());
+        assert!(!proton.invalid());
+        assert!(proton
+            .metrics
+            .render()
+            .contains("protonvpn_session_unconfirmed 1"));
+    }
 
     #[test]
     fn parses_set_cookie_headers() {

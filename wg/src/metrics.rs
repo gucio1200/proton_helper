@@ -21,6 +21,7 @@ pub struct Metrics {
     refresh_invalid: AtomicU64,
     refresh_failed: AtomicU64,
     session_invalid: AtomicU64,
+    session_unconfirmed: AtomicU64,
     session_persist_failed: AtomicU64,
     heartbeat: AtomicU64,
     server: Mutex<Option<CurrentServer>>,
@@ -84,6 +85,11 @@ impl Metrics {
                 self.refresh_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    pub fn session_confirmed(&self, confirmed: bool) {
+        self.session_unconfirmed
+            .store(u64::from(!confirmed), Ordering::Relaxed);
     }
 
     pub fn session_persisted(&self, ok: bool) {
@@ -157,6 +163,12 @@ impl Metrics {
             "protonvpn_session_invalid",
             "1 when Proton rejected the session and a new login is needed",
             load(&self.session_invalid) as f64,
+        );
+        gauge(
+            &mut out,
+            "protonvpn_session_unconfirmed",
+            "1 while the current Proton tokens have not been used yet, so the refresh token is still provisional",
+            load(&self.session_unconfirmed) as f64,
         );
         counter(
             &mut out,
