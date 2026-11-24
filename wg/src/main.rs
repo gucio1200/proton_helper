@@ -19,11 +19,12 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::metrics::{CurrentServer, Metrics, Regeneration};
-use crate::proton::Proton;
+use crate::proton::{Confirmation, Proton};
 use crate::session::{Origin, SessionStore};
 
 const HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(300);
 const SETTLE_AFTER_APPLY: Duration = Duration::from_secs(15);
+const CONFIRM_RETRY: Duration = Duration::from_secs(300);
 
 fn main() -> ExitCode {
     let _ = dotenvy::dotenv();
@@ -91,6 +92,7 @@ fn run() -> Result<()> {
         }
     }
 
+    let mut last_confirm: Option<Instant> = None;
     let mut failures = 0u32;
     let mut healthy: Option<bool> = None;
     while running.load(Ordering::SeqCst) {
@@ -125,7 +127,33 @@ fn run() -> Result<()> {
             continue;
         }
 
-        if proton.can_refresh() && last_refresh.elapsed() >= config.session_refresh_interval {
+        if !proton.confirmed()
+            && !proton.invalid()
+            && last_confirm.is_none_or(|at| at.elapsed() >= CONFIRM_RETRY)
+        {
+            last_confirm = Some(Instant::now());
+            match proton.confirm() {
+                Ok(Confirmation::Confirmed) => info!("Proton session confirmed"),
+                Ok(Confirmation::Expired) if proton.can_refresh() => {
+                    info!("Proton access token expired, refreshing the session");
+                    if let Err(e) = proton.refresh() {
+                        warn!(error = %format!("{e:#}"), "Proton session refresh failed");
+                    }
+                    last_refresh = Instant::now();
+                }
+                Ok(Confirmation::Expired) => {
+                    warn!("Proton access token expired and REFRESH_TOKEN is not set; log in again and update the protonvpn item in 1Password");
+                }
+                Err(e) => {
+                    warn!(error = %format!("{e:#}"), "Proton session confirmation failed, retrying");
+                }
+            }
+        }
+
+        if proton.can_refresh()
+            && proton.confirmed()
+            && last_refresh.elapsed() >= config.session_refresh_interval
+        {
             info!("scheduled Proton session refresh");
             if let Err(e) = proton.refresh() {
                 warn!(error = %format!("{e:#}"), "scheduled Proton session refresh failed");
